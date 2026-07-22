@@ -57,7 +57,7 @@ MCP Registry publishing:
 5. A real funded OpenAI Ads account is needed to validate live writes end to end. Reads can be validated with any valid OpenAI Ads API key.
 6. `server.json`, `typescript/package.json`, `python/pyproject.toml`, the Node user agent, and the hosted server card must agree on the public version.
 7. MCP Registry versions are immutable after publish. For metadata-only corrections after a package release, publish a new server version rather than reusing an existing one.
-8. The current registry `0.1.6` entry is already live. Any registry metadata correction to that release line must go out with the next package release version unless the registry adds an explicit update mechanism.
+8. The current registry `0.1.7` entry is already live. Any registry metadata correction to that release line must go out with the next package release version unless the registry adds an explicit update mechanism.
 
 ## Sync and Release Flow
 
