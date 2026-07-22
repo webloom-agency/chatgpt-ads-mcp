@@ -14,7 +14,10 @@ async def build_campaign(
     budget_usd: float,
     ad_group: Any,
     ads: Any,
+    bidding_type: Literal["impressions", "clicks", "conversions"] | None = None,
+    conversion_event_setting_id: str | None = None,
     confirm_budget: bool = False,
+    idempotency_key: str | None = None,
 ) -> str:
     """Build a complete paused campaign tree in one guarded workflow.
 
@@ -34,10 +37,22 @@ async def build_campaign(
         return ads_parse_err
     if not ad_payloads:
         return _bad_request("ads must include at least one ad.")
+    idempotency_key, idempotency_err = _validate_idempotency_key(idempotency_key)
+    if idempotency_err:
+        return idempotency_err
+    has_product_set = group_payload.get("product_set") is not None
+    if bidding_type == "conversions" and group_payload.get("billing_event") != "click":
+        return _bad_request(
+            "Conversion-optimized campaign ad groups must use billing_event='click'. "
+            "The bid is your CPA input even though billing remains per click."
+        )
     campaign_body, campaign_err = _build_campaign_body(
         name=name,
         budget_usd=budget_usd,
         status="paused",
+        mode="product_feed" if has_product_set else None,
+        bidding_type=bidding_type,
+        conversion_event_setting_ids=[conversion_event_setting_id] if conversion_event_setting_id else None,
         confirm_budget=confirm_budget,
         create=True,
     )
@@ -48,7 +63,11 @@ async def build_campaign(
         return client_err
     created: dict[str, Any] = {"campaign": None, "ad_group": None, "ads": []}
     try:
-        campaign = await client.post("/campaigns", json=campaign_body)
+        campaign_kwargs = {"json": campaign_body}
+        campaign_key = _child_idempotency_key(idempotency_key, "campaign")
+        if campaign_key:
+            campaign_kwargs["idempotency_key"] = campaign_key
+        campaign = await client.post("/campaigns", **campaign_kwargs)
         created["campaign"] = campaign
         campaign_id = _extract_id(campaign, "id", "campaign_id")
         if not campaign_id:
@@ -60,11 +79,16 @@ async def build_campaign(
             max_bid_usd=group_payload.get("max_bid_usd"),
             status="paused",
             context_hints=group_payload.get("context_hints"),
+            product_set=group_payload.get("product_set"),
             create=True,
         )
         if ad_group_err:
             return _ok({"created": created, "error": json.loads(ad_group_err)})
-        group = await client.post("/ad_groups", json=ad_group_body)
+        ad_group_kwargs = {"json": ad_group_body}
+        ad_group_key = _child_idempotency_key(idempotency_key, "ad_group")
+        if ad_group_key:
+            ad_group_kwargs["idempotency_key"] = ad_group_key
+        group = await client.post("/ad_groups", **ad_group_kwargs)
         created["ad_group"] = group
         ad_group_id = _extract_id(group, "id", "ad_group_id")
         if not ad_group_id:
@@ -86,7 +110,11 @@ async def build_campaign(
             )
             if ad_err:
                 return _ok({"created": created, "error": json.loads(ad_err)})
-            created_ad = await client.post("/ads", json=ad_body)
+            ad_kwargs = {"json": ad_body}
+            ad_key = _child_idempotency_key(idempotency_key, f"ad_{index}")
+            if ad_key:
+                ad_kwargs["idempotency_key"] = ad_key
+            created_ad = await client.post("/ads", **ad_kwargs)
             created["ads"].append(created_ad)
         return _ok({
             "created": created,
@@ -142,8 +170,8 @@ async def draft_context_hints(
     return _ok({"context_hints": [item["context_hint"] for item in hints], "drafts": hints})
 
 
-@ads_tool(writes=True)
-async def bulk_ab_test_hints(ad_group_id: str, variants: Any) -> str:
+@ads_tool(writes=True, open_world=True)
+async def bulk_ab_test_hints(ad_group_id: str, variants: Any, idempotency_key: str | None = None) -> str:
     """Create multiple paused chat_card ads under one ad group for a clean A/B test.
 
     variants is a list of objects with title, body, target_url, file_id, and
@@ -158,6 +186,9 @@ async def bulk_ab_test_hints(ad_group_id: str, variants: Any) -> str:
         return _bad_request("variants must include at least one variant.")
     if len(parsed) > 20:
         return _bad_request("Create at most 20 variants per A/B test batch.")
+    idempotency_key, idempotency_err = _validate_idempotency_key(idempotency_key)
+    if idempotency_err:
+        return idempotency_err
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
@@ -180,7 +211,11 @@ async def bulk_ab_test_hints(ad_group_id: str, variants: Any) -> str:
             )
             if ad_err:
                 return _ok({"created": created, "error": json.loads(ad_err)})
-            ad = await client.post("/ads", json=ad_body)
+            ad_kwargs = {"json": ad_body}
+            ad_key = _child_idempotency_key(idempotency_key, f"ad_{index}")
+            if ad_key:
+                ad_kwargs["idempotency_key"] = ad_key
+            ad = await client.post("/ads", **ad_kwargs)
             created.append(ad)
         return _ok({
             "created_ads": created,

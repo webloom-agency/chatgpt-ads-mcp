@@ -5,7 +5,7 @@ from __future__ import annotations
 from ._core import *
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def get_account() -> str:
     """Get the authenticated OpenAI Ads account.
 

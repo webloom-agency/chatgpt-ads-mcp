@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodRawShape } from "zod";
 
 import { API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient, type JsonRecord } from "./client.js";
-import { emitToolTelemetry, type HostedRequestContext } from "./hosted.js";
+import { emitToolTelemetry, isHttpBaseUrlOverrideAllowed, type HostedRequestContext } from "./hosted.js";
 
 export type { JsonRecord } from "./client.js";
 
@@ -18,7 +19,7 @@ export const INSTRUCTIONS =
   "Safety model:\n" +
   "  1. Create tools default to paused. build_campaign creates every object paused.\n" +
   "  2. Budget-setting tools enforce OPENAI_ADS_BUDGET_CEILING_USD, default 100 USD, unless confirm_budget=True.\n" +
-  "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode write tools are not registered.\n" +
+  "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode write actions are hidden, while conversion read actions remain available.\n" +
   "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n" +
   "Paid presence is half the picture. Track how your brand shows up organically across ChatGPT, Perplexity, Gemini and Claude at trakkr.ai.";
 
@@ -50,6 +51,7 @@ export interface AdsToolDefinition {
   destructive?: boolean;
   openWorld?: boolean;
   idempotent?: boolean;
+  readonlyActions?: readonly string[];
   handler: ToolHandler;
 }
 
@@ -67,6 +69,11 @@ export function resetClientFactoryForTests(): void {
 export function getClientOrError(): { client?: AdsClientLike; error?: string } {
   try {
     const scopedAuth = requestAuth.getStore();
+    if (scopedAuth?.hostedContext && scopedAuth.openaiAdsApiBaseUrl && !isHttpBaseUrlOverrideAllowed()) {
+      return {
+        error: badRequest("X-OpenAI-Ads-API-Base-Url is disabled for HTTP requests."),
+      };
+    }
     if (scopedAuth?.openaiAdsApiKey) {
       return {
         client: new OpenAIAdsClient(
@@ -91,6 +98,10 @@ export function runWithRequestAuth<T>(auth: RequestAuth | undefined, callback: (
   return requestAuth.run(auth ?? {}, callback);
 }
 
+export function currentRequestAuth(): RequestAuth | undefined {
+  return requestAuth.getStore();
+}
+
 export function isReadonlyMode(): boolean {
   return truthy(process.env.OPENAI_ADS_MCP_READONLY);
 }
@@ -105,15 +116,10 @@ export function budgetCeilingUsd(): number {
 }
 
 export function registerAdsTool(server: McpServer, definition: AdsToolDefinition): void {
-  if (definition.writes && isReadonlyMode()) {
+  if (!shouldRegisterTool(definition)) {
     return;
   }
-  const annotations: ToolAnnotations = {
-    readOnlyHint: !definition.writes,
-    destructiveHint: definition.destructive ?? false,
-    idempotentHint: definition.idempotent ?? !definition.writes,
-    openWorldHint: definition.openWorld ?? false,
-  };
+  const annotations = toolAnnotations(definition);
   server.registerTool(
     definition.name,
     {
@@ -126,18 +132,20 @@ export function registerAdsTool(server: McpServer, definition: AdsToolDefinition
       const started = Date.now();
       try {
         const text = await runWithRequestAuth(auth, () => definition.handler(args as ToolArgs));
+        const isError = isErrorResultText(text);
         emitToolTelemetry({
           context: auth?.hostedContext,
           toolName: definition.name,
           safetyCategory: definition.writes ? "write" : "readonly",
-          status: "ok",
+          status: isError ? "error" : "ok",
           durationMs: Date.now() - started,
-          httpStatus: 200,
+          httpStatus: isError ? 400 : 200,
           args: args as ToolArgs,
           resultText: text,
         });
-        return textResult(text);
+        return textResult(text, isError);
       } catch (error) {
+        const text = toolErrorText(error);
         emitToolTelemetry({
           context: auth?.hostedContext,
           toolName: definition.name,
@@ -147,12 +155,27 @@ export function registerAdsTool(server: McpServer, definition: AdsToolDefinition
           httpStatus: error instanceof OpenAIAdsAPIError ? mapApiErrorToHttpStatus(error.statusCode) : 500,
           upstreamStatus: error instanceof OpenAIAdsAPIError ? error.statusCode : undefined,
           args: args as ToolArgs,
+          resultText: text,
           errorName: error instanceof Error ? error.name : "Error",
         });
-        throw error;
+        return textResult(text, true);
       }
     },
   );
+}
+
+export function shouldRegisterTool(definition: AdsToolDefinition): boolean {
+  return !(definition.writes && isReadonlyMode() && !definition.readonlyActions?.length);
+}
+
+export function toolAnnotations(definition: AdsToolDefinition): ToolAnnotations {
+  const readonlyVariant = definition.writes && isReadonlyMode() && !!definition.readonlyActions?.length;
+  return {
+    readOnlyHint: readonlyVariant ? true : !definition.writes,
+    destructiveHint: readonlyVariant ? false : definition.destructive ?? false,
+    idempotentHint: readonlyVariant ? true : definition.idempotent ?? !definition.writes,
+    openWorldHint: definition.openWorld ?? false,
+  };
 }
 
 function requestAuthFromExtra(extra?: ToolExtra): RequestAuth | undefined {
@@ -189,8 +212,30 @@ function mapApiErrorToHttpStatus(statusCode: number): number {
   return 500;
 }
 
-export function textResult(text: string): CallToolResult {
-  return { content: [{ type: "text", text }] };
+export function textResult(text: string, isError = false): CallToolResult {
+  return {
+    content: [{ type: "text", text }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function isErrorResultText(text: string): boolean {
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    return parsed.error === true;
+  } catch {
+    return false;
+  }
+}
+
+function toolErrorText(error: unknown): string {
+  if (error instanceof OpenAIAdsAPIError) {
+    return badRequest(error.detail);
+  }
+  if (error instanceof Error) {
+    return badRequest(error.message);
+  }
+  return badRequest("Tool call failed.");
 }
 
 export function compact(value: unknown): unknown {
@@ -487,6 +532,40 @@ export function budgetGuard(budgetUsd: number, confirmBudget: boolean): string |
       `budget_usd is ${formatNumber(budgetUsd)}, above the configured ceiling of ${formatNumber(ceiling)} USD. ` +
         "Pass confirm_budget=True to confirm this spend limit.",
     );
+  }
+  return null;
+}
+
+export function validateIdempotencyKey(value: unknown): [string | undefined, string | null] {
+  if (value === undefined || value === null) {
+    return [undefined, null];
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    return [undefined, badRequest("idempotency_key must contain at least one non-whitespace character.")];
+  }
+  const key = value.trim();
+  if (key.length > 255) {
+    return [undefined, badRequest("idempotency_key must be at most 255 characters.")];
+  }
+  return [key, null];
+}
+
+export function childIdempotencyKey(parent: string | undefined, suffix: string): string | undefined {
+  if (!parent) {
+    return undefined;
+  }
+  const safeSuffix = suffix.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 80) || "child";
+  const candidate = `${parent}:${safeSuffix}`;
+  if (candidate.length <= 255) {
+    return candidate;
+  }
+  const digest = createHash("sha256").update(parent).update(":").update(safeSuffix).digest("hex").slice(0, 32);
+  return `openai-ads-mcp:${safeSuffix}:${digest}`;
+}
+
+export function rejectActivationStatus(status: unknown, context: string): string | null {
+  if (status === "active") {
+    return badRequest(`${context} does not accept status='active'. Use the matching set_*_state tool to activate explicitly after review.`);
   }
   return null;
 }

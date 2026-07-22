@@ -3,10 +3,13 @@ import { z } from "zod";
 
 import {
   badRequest,
+  currentRequestAuth,
   getClientOrError,
   handleApiError,
   ok,
   optionalParams,
+  rejectActivationStatus,
+  validateIdempotencyKey,
   validateIntRange,
   validateNonEmpty,
   validateOption,
@@ -14,6 +17,7 @@ import {
   type JsonRecord,
   type ToolArgs,
 } from "../core.js";
+import { isHttpFilePathUploadAllowed } from "../hosted.js";
 
 const AD_STATES = new Set(["activate", "pause", "archive"]);
 const AD_STATUSES = new Set(["active", "paused", "archived"]);
@@ -84,6 +88,8 @@ export function buildAdBody(input: {
   const status = input.status ?? (create ? "paused" : undefined);
   if (status !== undefined) {
     if (!AD_STATUSES.has(status)) return [null, badRequest("status must be active, paused, or archived.")];
+    const activationError = rejectActivationStatus(status, create ? "create_ad" : "update_ad");
+    if (activationError) return [null, activationError];
     if (create && status !== "paused") return [null, badRequest("Create tools only create paused ads. Use set_ad_state after review.")];
     payload.status = status;
   }
@@ -120,6 +126,9 @@ async function getAd(args: ToolArgs): Promise<string> {
 
 async function uploadCreative(args: ToolArgs): Promise<string> {
   if (Boolean(args.image_url) === Boolean(args.file_path)) return badRequest("Provide exactly one of image_url or file_path.");
+  if (args.file_path && currentRequestAuth()?.hostedContext && !isHttpFilePathUploadAllowed()) {
+    return badRequest("file_path uploads are disabled over HTTP. Use image_url or run the MCP server over stdio for local file uploads.");
+  }
   const { client, error } = getClientOrError();
   if (error) return error;
   try {
@@ -135,10 +144,12 @@ async function uploadCreative(args: ToolArgs): Promise<string> {
 async function createAd(args: ToolArgs): Promise<string> {
   const [payload, payloadError] = buildAdBody({ ...args, status: String(args.status ?? "paused"), create: true });
   if (payloadError) return payloadError;
+  const [idempotencyKey, idempotencyError] = validateIdempotencyKey(args.idempotency_key);
+  if (idempotencyError) return idempotencyError;
   const { client, error } = getClientOrError();
   if (error) return error;
   try {
-    return ok(await client!.post("/ads", payload!));
+    return ok(await client!.post("/ads", payload!, idempotencyKey ? { idempotencyKey } : undefined));
   } catch (apiError) {
     return handleApiError(apiError);
   }
@@ -182,6 +193,7 @@ export const adTools: AdsToolDefinition[] = [
     description: "List ads in an ad group.",
     inputSchema: { ad_group_id: z.string(), limit: z.number().int().default(20), after: z.string().optional(), before: z.string().optional(), order: orderSchema },
     argNames: ["ad_group_id", "limit", "after", "before", "order"],
+    openWorld: true,
     handler: listAds,
   },
   {
@@ -189,6 +201,7 @@ export const adTools: AdsToolDefinition[] = [
     description: "Get one ad by id, including review_status and creative metadata.",
     inputSchema: { ad_id: z.string() },
     argNames: ["ad_id"],
+    openWorld: true,
     handler: getAd,
   },
   {
@@ -197,6 +210,7 @@ export const adTools: AdsToolDefinition[] = [
     inputSchema: { image_url: z.string().optional(), file_path: z.string().optional() },
     argNames: ["image_url", "file_path"],
     writes: true,
+    openWorld: true,
     handler: uploadCreative,
   },
   {
@@ -211,10 +225,12 @@ export const adTools: AdsToolDefinition[] = [
       target_url: z.string().optional(),
       file_id: z.string().optional(),
       price: z.string().optional(),
-      status: z.enum(["paused", "active"]).default("paused"),
+      status: z.enum(["paused"]).default("paused"),
+      idempotency_key: z.string().optional(),
     },
-    argNames: ["ad_group_id", "name", "creative_type", "title", "body", "target_url", "file_id", "price", "status"],
+    argNames: ["ad_group_id", "name", "creative_type", "title", "body", "target_url", "file_id", "price", "status", "idempotency_key"],
     writes: true,
+    openWorld: true,
     handler: createAd,
   },
   {
@@ -229,10 +245,11 @@ export const adTools: AdsToolDefinition[] = [
       target_url: z.string().optional(),
       file_id: z.string().optional(),
       price: z.string().optional(),
-      status: z.enum(["active", "paused", "archived"]).optional(),
+      status: z.enum(["paused", "archived"]).optional(),
     },
     argNames: ["ad_id", "name", "creative_type", "title", "body", "target_url", "file_id", "price", "status"],
     writes: true,
+    openWorld: true,
     handler: updateAd,
   },
   {

@@ -6,6 +6,8 @@ on:
     branches:
       - main
   workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
 
 permissions:
   contents: read
@@ -22,3 +24,6 @@ jobs:
 
       - name: Compare vendored spec to live spec
         run: node typescript/scripts/check-openapi-drift.mjs
+
+      - name: Check guide-only contract markers
+        run: node typescript/scripts/check-docs-contract.mjs

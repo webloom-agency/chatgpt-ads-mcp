@@ -6,13 +6,12 @@ Publishing happens from the dedicated public repository:
 
 Do not publish from this monorepo.
 
-## Before the First Release
+Current public release: `0.1.7`.
 
-Confirm that both package names are free:
+## Package Names
 
 - PyPI: `openai-ads-mcp`
 - npm: `openai-ads-mcp`
-- npm fallback, if needed: `@trakkr/openai-ads-mcp`
 
 The public repo holds both runtimes:
 
@@ -25,7 +24,7 @@ The public repo holds both runtimes:
 
 ## Trusted Publishing Setup
 
-Configure trusted publishing before pushing the first release tag.
+Trusted publishing should remain configured before pushing release tags.
 
 PyPI trusted publisher:
 
@@ -36,7 +35,7 @@ PyPI trusted publisher:
 
 npm trusted publishing:
 
-- Package: `openai-ads-mcp` or the fallback scoped name
+- Package: `openai-ads-mcp`
 - Repository: `trakkr-aisearch/openai-ads-mcp`
 - Workflow file: `publish-npm.yml`
 
@@ -56,27 +55,32 @@ MCP Registry publishing:
 3. The vendored OpenAPI reference is the shared `openapi.json` in the repo root.
 4. Package and MCP Registry workflows trigger on tags matching `openai-ads-mcp-v*`.
 5. A real funded OpenAI Ads account is needed to validate live writes end to end. Reads can be validated with any valid OpenAI Ads API key.
+6. `server.json`, `typescript/package.json`, `python/pyproject.toml`, the Node user agent, and the hosted server card must agree on the public version.
+7. MCP Registry versions are immutable after publish. For metadata-only corrections after a package release, publish a new server version rather than reusing an existing one.
+8. The current registry `0.1.6` entry is already live. Any registry metadata correction to that release line must go out with the next package release version unless the registry adds an explicit update mechanism.
 
 ## Sync and Release Flow
 
 1. Create or update the dedicated public repository locally.
 
 ```bash
-mkdir -p "/Users/mack/Cursor/openai-ads-mcp-publish"
+PUBLIC_REPO_DIR="${PUBLIC_REPO_DIR:-../openai-ads-mcp-publish}"
+SOURCE_DIR="${SOURCE_DIR:-services/openai-ads-mcp}"
+mkdir -p "$PUBLIC_REPO_DIR"
 rsync -av --delete \
   --exclude '.git' \
   --exclude '.pytest_cache' \
   --exclude '__pycache__' \
   --exclude 'node_modules' \
   --exclude 'dist' \
-  "/Users/mack/Cursor/Trakkr V2/services/openai-ads-mcp/" \
-  "/Users/mack/Cursor/openai-ads-mcp-publish/"
+  "$SOURCE_DIR/" \
+  "$PUBLIC_REPO_DIR/"
 ```
 
 2. Run both test suites and the spec drift check in the dedicated repo.
 
 ```bash
-cd "/Users/mack/Cursor/openai-ads-mcp-publish/python"
+cd "$PUBLIC_REPO_DIR/python"
 python -m pytest -q
 python -c "import openai_ads_mcp; print('ok')"
 
@@ -85,14 +89,15 @@ npm install
 npm run build
 npm test
 npm run check:openapi
+npm run check:docs
 ```
 
 3. Commit and push the synced public repo.
 
 ```bash
-cd "/Users/mack/Cursor/openai-ads-mcp-publish"
+cd "$PUBLIC_REPO_DIR"
 git add .
-git commit -m "Initial openai-ads-mcp release"
+git commit -m "Release openai-ads-mcp X.Y.Z"
 git push origin main
 ```
 
@@ -110,6 +115,8 @@ git push origin openai-ads-mcp-vX.Y.Z
 - Python package is visible at `https://pypi.org/project/openai-ads-mcp/`.
 - npm package is visible at `https://www.npmjs.com/package/openai-ads-mcp`.
 - Registry metadata is visible from `https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.trakkr-aisearch/openai-ads-mcp`.
+- `npm pack --dry-run` from `typescript/` includes `LICENSE`.
+- `python -m build` from `python/` includes `LICENSE` in the sdist and `*.dist-info/licenses/LICENSE` in the wheel.
 
 ## Manual Smoke Test
 

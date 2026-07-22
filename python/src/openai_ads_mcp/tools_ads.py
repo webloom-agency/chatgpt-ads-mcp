@@ -88,6 +88,8 @@ def _build_ad_body(
     if status is not None:
         if status not in _AD_STATUSES:
             return None, _bad_request("status must be active, paused, or archived.")
+        if activation_err := _reject_activation_status(status, "create_ad" if create else "update_ad"):
+            return None, activation_err
         if create and status != "paused":
             return None, _bad_request("Create tools only create paused ads. Use set_ad_state after review.")
         payload["status"] = status
@@ -98,7 +100,7 @@ def _build_ad_body(
     return payload, None
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def list_ads(
     ad_group_id: str,
     limit: int = 20,
@@ -129,7 +131,7 @@ async def list_ads(
         return _err(e)
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def get_ad(ad_id: str) -> str:
     """Get one ad by id, including review_status and creative metadata."""
     if ad_err := _validate_non_empty("ad_id", ad_id):
@@ -143,7 +145,7 @@ async def get_ad(ad_id: str) -> str:
         return _err(e)
 
 
-@ads_tool(writes=True)
+@ads_tool(writes=True, open_world=True)
 async def upload_creative(image_url: str | None = None, file_path: str | None = None) -> str:
     """Upload a creative image and receive a file_id.
 
@@ -166,7 +168,7 @@ async def upload_creative(image_url: str | None = None, file_path: str | None = 
         return _err(e)
 
 
-@ads_tool(writes=True)
+@ads_tool(writes=True, open_world=True)
 async def create_ad(
     ad_group_id: str,
     name: str,
@@ -176,7 +178,8 @@ async def create_ad(
     target_url: str | None = None,
     file_id: str | None = None,
     price: str | None = None,
-    status: Literal["paused", "active"] = "paused",
+    status: Literal["paused"] = "paused",
+    idempotency_key: str | None = None,
 ) -> str:
     """Create a paused ad.
 
@@ -197,16 +200,22 @@ async def create_ad(
     )
     if payload_err:
         return payload_err
+    idempotency_key, idempotency_err = _validate_idempotency_key(idempotency_key)
+    if idempotency_err:
+        return idempotency_err
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
     try:
-        return _ok(await client.post("/ads", json=payload))
+        kwargs = {"json": payload}
+        if idempotency_key:
+            kwargs["idempotency_key"] = idempotency_key
+        return _ok(await client.post("/ads", **kwargs))
     except OpenAIAdsAPIError as e:
         return _err(e)
 
 
-@ads_tool(writes=True)
+@ads_tool(writes=True, open_world=True)
 async def update_ad(
     ad_id: str,
     name: str | None = None,
@@ -216,7 +225,7 @@ async def update_ad(
     target_url: str | None = None,
     file_id: str | None = None,
     price: str | None = None,
-    status: Literal["active", "paused", "archived"] | None = None,
+    status: Literal["paused", "archived"] | None = None,
 ) -> str:
     """Update ad name, creative, or status."""
     if ad_err := _validate_non_empty("ad_id", ad_id):

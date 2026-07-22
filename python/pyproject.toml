@@ -4,10 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openai-ads-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "Typed MCP server for OpenAI Ads and ChatGPT Ads via the Advertiser API"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Trakkr", email = "hello@trakkr.ai" }]
 keywords = ["mcp", "mcp-server", "openai", "openai-ads", "chatgpt", "chatgpt-ads", "advertiser-api", "ads", "advertising", "ai-search", "trakkr"]
@@ -39,6 +40,9 @@ Issues = "https://github.com/trakkr-aisearch/openai-ads-mcp/issues"
 
 [tool.hatch.build.targets.sdist]
 include = ["src/openai_ads_mcp", "README.md"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../LICENSE" = "LICENSE"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openai_ads_mcp"]

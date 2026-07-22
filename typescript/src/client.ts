@@ -6,7 +6,7 @@ import { upstreamResponseMaxBytes, upstreamTimeoutMs } from "./hosted.js";
 export const API_BASE_URL = "https://api.ads.openai.com/v1";
 export const CONVERSIONS_BASE_URL = "https://bzr.openai.com/v1";
 
-const USER_AGENT = "openai-ads-mcp/0.1.6";
+const USER_AGENT = "openai-ads-mcp/0.1.7";
 
 const FRIENDLY_ERRORS: Record<number, string> = {
   401: "Invalid or expired OPENAI_ADS_API_KEY.",
@@ -52,8 +52,8 @@ export class OpenAIAdsClient {
     return this.request(this.baseUrl, "GET", path, { params });
   }
 
-  async post(path: string, body?: JsonRecord): Promise<JsonRecord> {
-    return this.request(this.baseUrl, "POST", path, { json: body });
+  async post(path: string, body?: JsonRecord, options?: { idempotencyKey?: string }): Promise<JsonRecord> {
+    return this.request(this.baseUrl, "POST", path, { json: body, idempotencyKey: options?.idempotencyKey });
   }
 
   async uploadFile(path: string, filePath: string): Promise<JsonRecord> {
@@ -63,10 +63,10 @@ export class OpenAIAdsClient {
     return this.request(this.baseUrl, "POST", path, { body: form });
   }
 
-  async postConversions(pixelId: string, events: JsonRecord[]): Promise<JsonRecord> {
+  async postConversions(pixelId: string, events: JsonRecord[], validateOnly = false): Promise<JsonRecord> {
     return this.request(CONVERSIONS_BASE_URL, "POST", "/events", {
       params: { pid: pixelId },
-      json: { events },
+      json: { validate_only: validateOnly, events },
       redactDetail: true,
     });
   }
@@ -80,6 +80,7 @@ export class OpenAIAdsClient {
       json?: JsonRecord;
       body?: BodyInit;
       redactDetail?: boolean;
+      idempotencyKey?: string;
     } = {},
   ): Promise<JsonRecord> {
     const url = buildUrl(baseUrl, path, options.params);
@@ -92,6 +93,9 @@ export class OpenAIAdsClient {
     if (options.json !== undefined) {
       headers.set("Content-Type", "application/json");
       body = JSON.stringify(options.json);
+    }
+    if (options.idempotencyKey) {
+      headers.set("Idempotency-Key", options.idempotencyKey);
     }
     try {
       const timeoutMs = upstreamTimeoutMs();

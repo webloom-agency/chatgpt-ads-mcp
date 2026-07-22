@@ -1,4 +1,20 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
-  "maintainers": ["macklpgr"]
+  "maintainers": ["macklpgr"],
+  "type": "mcp_server",
+  "status": "beta",
+  "license": "MIT",
+  "homepage": "https://trakkr.ai/openai-ads-mcp",
+  "repository": "https://github.com/trakkr-aisearch/openai-ads-mcp",
+  "transport": ["stdio", "streamable-http"],
+  "tools": 27,
+  "keywords": [
+    "openai-ads",
+    "chatgpt-ads",
+    "openai ads mcp",
+    "chatgpt ads mcp",
+    "advertiser-api",
+    "mcp",
+    "marketing-automation"
+  ]
 }

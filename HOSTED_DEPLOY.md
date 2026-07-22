@@ -30,13 +30,13 @@ export OPENAI_ADS_MCP_TELEMETRY_SALT="$(openssl rand -hex 32)"
 
 Do not set `OPENAI_ADS_API_KEY`.
 
-Optional if a Cloudflare Worker is placed in front:
+Optional but recommended when a Cloudflare Worker is placed in front:
 
 ```bash
 export OPENAI_ADS_MCP_EDGE_SECRET="$(openssl rand -hex 32)"
 ```
 
-If `OPENAI_ADS_MCP_EDGE_SECRET` is set, Cloud Run rejects requests without `X-Trakkr-Edge-Secret` except `/healthz`, `/health`, and `/ready`.
+If `OPENAI_ADS_MCP_EDGE_SECRET` is set on Cloud Run, Cloud Run rejects requests without `X-Trakkr-Edge-Secret` except `/healthz`, `/health`, and `/ready`. The Cloudflare Worker reads the same `OPENAI_ADS_MCP_EDGE_SECRET` binding and forwards it to Cloud Run as `X-Trakkr-Edge-Secret`.
 
 ## Deploy
 
@@ -60,6 +60,32 @@ The script deploys with these spend-protection defaults:
 
 Cloud Run requires concurrency `1` when CPU is below `1`. This endpoint deliberately keeps `0.25 CPU` and lets availability degrade under pressure instead of increasing active compute.
 
+### Add the Edge Secret to Cloud Run
+
+The deploy script always manages `OPENAI_ADS_MCP_TELEMETRY_SALT`. If you are using the Cloudflare Worker origin guard, add the edge secret after deploy:
+
+```bash
+PROJECT_ID="${PROJECT_ID:-trakkr-ai}"
+REGION="${REGION:-us-east1}"
+SERVICE="${SERVICE:-openai-ads-mcp}"
+EDGE_SECRET_NAME="${EDGE_SECRET_NAME:-openai-ads-mcp-edge-secret}"
+
+printf '%s' "$OPENAI_ADS_MCP_EDGE_SECRET" | gcloud secrets create "$EDGE_SECRET_NAME" \
+  --project "$PROJECT_ID" \
+  --replication-policy=automatic \
+  --data-file=- 2>/dev/null || \
+printf '%s' "$OPENAI_ADS_MCP_EDGE_SECRET" | gcloud secrets versions add "$EDGE_SECRET_NAME" \
+  --project "$PROJECT_ID" \
+  --data-file=-
+
+gcloud run services update "$SERVICE" \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --update-secrets "OPENAI_ADS_MCP_EDGE_SECRET=${EDGE_SECRET_NAME}:latest"
+```
+
+Use `--update-secrets`, not `--set-env-vars`, so existing Cloud Run configuration is preserved.
+
 ## Cloudflare
 
 Use a proxied DNS record for:
@@ -67,6 +93,16 @@ Use a proxied DNS record for:
 ```text
 openai-ads-mcp.trakkr.ai
 ```
+
+Deploy the Worker from `services/openai-ads-mcp`:
+
+```bash
+cd services/openai-ads-mcp
+printf '%s' "$OPENAI_ADS_MCP_EDGE_SECRET" | npx wrangler secret put OPENAI_ADS_MCP_EDGE_SECRET
+npx wrangler deploy
+```
+
+The Worker allows only `/mcp`, health paths, and `/.well-known/mcp/server-card.json`, caps request bodies at 256 KiB, forwards `X-Forwarded-Host`, and forwards the shared secret as `X-Trakkr-Edge-Secret` when the binding is present.
 
 Recommended rules:
 
@@ -144,13 +180,15 @@ curl -fsS https://openai-ads-mcp.trakkr.ai/mcp \
 
 Expected result: a normal MCP tool-result error asking for `X-OpenAI-Ads-API-Key`, not an upstream OpenAI request.
 
+If the edge secret is enabled, direct Cloud Run origin calls to `/mcp` should return `403` without `X-Trakkr-Edge-Secret`, while the Cloudflare hostname should continue to work.
+
 ## Release And Discovery
 
 After staging or production verifies:
 
 1. Keep `server.json` remote URL set to `https://openai-ads-mcp.trakkr.ai/mcp`.
 2. Sync to the public repo.
-3. Tag `openai-ads-mcp-v0.1.6`.
+3. Tag the next release, for example `openai-ads-mcp-v0.1.7`.
 4. Confirm npm, PyPI, and Official MCP Registry workflows pass.
 5. Submit the remote URL to Smithery.
 

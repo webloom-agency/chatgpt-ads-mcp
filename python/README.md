@@ -2,7 +2,7 @@
 
 <!-- mcp-name: io.github.trakkr-aisearch/openai-ads-mcp -->
 
-Python runtime for `openai-ads-mcp`, a typed MCP server for OpenAI's Advertiser API.
+Python runtime for `openai-ads-mcp`, a typed MCP server for OpenAI Ads, ChatGPT Ads MCP workflows, and OpenAI's Advertiser API.
 
 ## Quick start
 

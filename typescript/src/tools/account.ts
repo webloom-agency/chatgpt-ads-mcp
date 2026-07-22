@@ -19,6 +19,7 @@ export const accountTools: AdsToolDefinition[] = [
       "Get the authenticated OpenAI Ads account. Use this first to verify that OPENAI_ADS_API_KEY works and to read account id, name, timezone, currency, and settings.",
     inputSchema: {},
     argNames: [],
+    openWorld: true,
     handler: () => getAccount(),
   },
 ];

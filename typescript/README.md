@@ -1,6 +1,6 @@
 # openai-ads-mcp for Node
 
-Node runtime for `openai-ads-mcp`, a typed MCP server for OpenAI's Advertiser API.
+Node runtime for `openai-ads-mcp`, a typed MCP server for OpenAI Ads, ChatGPT Ads MCP workflows, and OpenAI's Advertiser API.
 
 It exposes the same tools, arguments, defaults, readonly mode, and budget guard as the Python package.
 
@@ -32,7 +32,7 @@ export OPENAI_ADS_MCP_HTTP_TOKEN="choose_a_long_random_token"
 npx -y openai-ads-mcp --http
 ```
 
-The MCP endpoint is `/mcp`, the health endpoint is `/healthz`, and remote mode is read-only by default. Set `OPENAI_ADS_MCP_HTTP_ALLOW_WRITES=1` only when write tools should be visible over HTTP. Clients can pass `X-OpenAI-Ads-API-Key` per request, or the server can use a server-side `OPENAI_ADS_API_KEY`.
+The MCP endpoint is `/mcp`; health checks are available at `/healthz`, `/health`, and `/ready`. Remote mode is read-only by default. Set `OPENAI_ADS_MCP_HTTP_ALLOW_WRITES=1` only when write tools should be visible over HTTP. Clients can pass `X-OpenAI-Ads-API-Key` per request, or the server can use a server-side `OPENAI_ADS_API_KEY`.
 
 For public hosted endpoints, use `OPENAI_ADS_MCP_HOSTED_PUBLIC=1`. Hosted public mode forces readonly mode, rejects server-side `OPENAI_ADS_API_KEY`, blocks `X-OpenAI-Ads-API-Base-Url`, requires `OPENAI_ADS_MCP_TELEMETRY_SALT`, exposes `/.well-known/mcp/server-card.json`, and logs only redacted summaries.
 

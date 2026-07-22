@@ -6,6 +6,7 @@ from ._core import *
 
 _CAMPAIGN_STATES = {"activate", "pause", "archive"}
 _CAMPAIGN_STATUSES = {"active", "paused", "archived"}
+_CAMPAIGN_BIDDING_TYPES = {"impressions", "clicks", "conversions"}
 
 
 def _locations_payload(locations: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -36,6 +37,8 @@ def _build_campaign_body(
     start_time: int | None = None,
     end_time: int | None = None,
     mode: str | None = None,
+    bidding_type: str | None = None,
+    conversion_event_setting_ids: Any = None,
     locations: Any = None,
     confirm_budget: bool = False,
     create: bool = False,
@@ -51,6 +54,8 @@ def _build_campaign_body(
     if status is not None:
         if status not in _CAMPAIGN_STATUSES:
             return None, _bad_request("status must be active, paused, or archived.")
+        if activation_err := _reject_activation_status(status, "create_campaign" if create else "update_campaign"):
+            return None, activation_err
         if create and status != "paused":
             return None, _bad_request("Create tools only create paused campaigns. Use set_campaign_state after review.")
         body["status"] = status
@@ -77,9 +82,34 @@ def _build_campaign_body(
     if start_time is not None and end_time is not None and end_time <= start_time:
         return None, _bad_request("end_time must be after start_time.")
     if mode is not None:
+        if not create:
+            return None, _bad_request("mode cannot be changed after campaign creation.")
         if mode != "product_feed":
             return None, _bad_request("mode must be product_feed when provided.")
         body["mode"] = mode
+    if bidding_type is not None:
+        if not create:
+            return None, _bad_request("bidding_type cannot be changed after campaign creation.")
+        if bidding_type not in _CAMPAIGN_BIDDING_TYPES:
+            return None, _bad_request("bidding_type must be impressions, clicks, or conversions.")
+        body["bidding_type"] = bidding_type
+    conversion_ids, conversion_ids_err = _coerce_string_list(
+        conversion_event_setting_ids,
+        "conversion_event_setting_ids",
+    )
+    if conversion_ids_err:
+        return None, conversion_ids_err
+    if conversion_ids is not None:
+        if len(conversion_ids) != 1:
+            return None, _bad_request("conversion_event_setting_ids must contain exactly one event setting id.")
+        body["conversion_event_setting_ids"] = conversion_ids
+    if create and bidding_type == "conversions":
+        if mode == "product_feed":
+            return None, _bad_request("Conversion-optimized campaigns cannot use product_feed mode.")
+        if conversion_ids is None:
+            return None, _bad_request("bidding_type='conversions' requires exactly one conversion_event_setting_ids value.")
+    elif create and conversion_ids is not None:
+        return None, _bad_request("conversion_event_setting_ids requires bidding_type='conversions' when creating a campaign.")
     targeting, targeting_err = _locations_payload(locations)
     if targeting_err:
         return None, targeting_err
@@ -90,7 +120,7 @@ def _build_campaign_body(
     return body, None
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def list_campaigns(
     limit: int = 20,
     after: str | None = None,
@@ -117,7 +147,7 @@ async def list_campaigns(
         return _err(e)
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def get_campaign(campaign_id: str) -> str:
     """Get one campaign by id."""
     if campaign_err := _validate_non_empty("campaign_id", campaign_id):
@@ -135,13 +165,16 @@ async def get_campaign(campaign_id: str) -> str:
 async def create_campaign(
     name: str,
     budget_usd: float,
-    status: Literal["paused", "active"] = "paused",
+    status: Literal["paused"] = "paused",
     description: str | None = None,
     start_time: int | None = None,
     end_time: int | None = None,
     mode: Literal["product_feed"] | None = None,
+    bidding_type: Literal["impressions", "clicks", "conversions"] | None = None,
+    conversion_event_setting_ids: Any = None,
     locations: Any = None,
     confirm_budget: bool = False,
+    idempotency_key: str | None = None,
 ) -> str:
     """Create an OpenAI Ads campaign, always safely paused by default.
 
@@ -153,6 +186,8 @@ async def create_campaign(
         start_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
         end_time: Optional Unix timestamp, 2000-01-01 to 2100-01-01.
         mode: Optional. Only product_feed is supported.
+        bidding_type: impressions, clicks, or conversions. Conversion optimization requires one event setting id.
+        conversion_event_setting_ids: Exactly one active standard conversion event for conversion optimization.
         locations: Optional geo target entries for targeting.locations.include.
         confirm_budget: Required when budget_usd exceeds OPENAI_ADS_BUDGET_CEILING_USD.
     """
@@ -164,17 +199,25 @@ async def create_campaign(
         start_time=start_time,
         end_time=end_time,
         mode=mode,
+        bidding_type=bidding_type,
+        conversion_event_setting_ids=conversion_event_setting_ids,
         locations=locations,
         confirm_budget=confirm_budget,
         create=True,
     )
     if body_err:
         return body_err
+    idempotency_key, idempotency_err = _validate_idempotency_key(idempotency_key)
+    if idempotency_err:
+        return idempotency_err
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
     try:
-        return _ok(await client.post("/campaigns", json=body))
+        kwargs = {"json": body}
+        if idempotency_key:
+            kwargs["idempotency_key"] = idempotency_key
+        return _ok(await client.post("/campaigns", **kwargs))
     except OpenAIAdsAPIError as e:
         return _err(e)
 
@@ -184,11 +227,11 @@ async def update_campaign(
     campaign_id: str,
     name: str | None = None,
     budget_usd: float | None = None,
-    status: Literal["active", "paused", "archived"] | None = None,
+    status: Literal["paused", "archived"] | None = None,
     description: str | None = None,
     start_time: int | None = None,
     end_time: int | None = None,
-    mode: Literal["product_feed"] | None = None,
+    conversion_event_setting_ids: Any = None,
     locations: Any = None,
     confirm_budget: bool = False,
 ) -> str:
@@ -207,7 +250,7 @@ async def update_campaign(
         description=description,
         start_time=start_time,
         end_time=end_time,
-        mode=mode,
+        conversion_event_setting_ids=conversion_event_setting_ids,
         locations=locations,
         confirm_budget=confirm_budget,
     )

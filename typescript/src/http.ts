@@ -1,16 +1,20 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import { INSTRUCTIONS, type AdsToolDefinition } from "./core.js";
+import { INSTRUCTIONS, toolAnnotations, type AdsToolDefinition } from "./core.js";
 import {
   configureHostedEnvironment,
   emitMcpRequestTelemetry,
   hostedBodyMaxBytes,
+  isHttpBaseUrlOverrideAllowed,
+  isHttpWriteModeAllowed,
   isHostedDisabled,
   isHostedPublicMode,
   makeRequestContext,
@@ -22,6 +26,7 @@ import {
 } from "./hosted.js";
 
 type AuthedIncomingMessage = IncomingMessage & { auth?: AuthInfo };
+type CreateMcpServer = () => McpServer;
 
 export interface HttpServerHandle {
   close: () => Promise<void>;
@@ -35,21 +40,24 @@ export interface HttpServerOptions {
   healthPath?: string;
 }
 
+interface McpSession {
+  id?: string;
+  mcpServer: McpServer;
+  transport: StreamableHTTPServerTransport;
+  closing: boolean;
+  lastSeenAt: number;
+}
+
 export async function startHttpServer(options: HttpServerOptions = {}): Promise<HttpServerHandle> {
   const { createOpenAIAdsMcpServer, registeredToolDefinitions } = await import("./index.js");
   configureHostedEnvironment();
 
-  const host = options.host ?? process.env.HOST ?? "0.0.0.0";
+  const host = options.host ?? process.env.HOST ?? (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
   const port = options.port ?? parsePort(process.env.PORT ?? process.env.OPENAI_ADS_MCP_HTTP_PORT);
   const mcpPath = normalisePath(options.mcpPath ?? process.env.OPENAI_ADS_MCP_HTTP_PATH ?? "/mcp");
   const healthPath = normalisePath(options.healthPath ?? process.env.OPENAI_ADS_MCP_HEALTH_PATH ?? "/healthz");
   const serverCardPath = "/.well-known/mcp/server-card.json";
-
-  const mcpServer = createOpenAIAdsMcpServer();
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  await mcpServer.connect(transport);
+  const sessions = new Map<string, McpSession>();
 
   const httpServer = createServer(async (req: AuthedIncomingMessage, res) => {
     const started = Date.now();
@@ -93,6 +101,11 @@ export async function startHttpServer(options: HttpServerOptions = {}): Promise<
 
       if (path !== mcpPath) {
         writeJson(res, 404, { error: "not_found" });
+        return;
+      }
+
+      if (!originOk(req)) {
+        writeJson(res, 403, { error: "forbidden_origin" });
         return;
       }
 
@@ -157,7 +170,7 @@ export async function startHttpServer(options: HttpServerOptions = {}): Promise<
 
       if (isHostedPublicMode() && parsedBody !== undefined) {
         const discoveryResponse = hostedDiscoveryResponse(parsedBody, registeredToolDefinitions());
-        if (discoveryResponse) {
+        if (discoveryResponse && !containsInitializeRequest(parsedBody)) {
           writeJson(res, 200, discoveryResponse);
           emitMcpRequestTelemetry({
             context: hostedContext,
@@ -183,7 +196,17 @@ export async function startHttpServer(options: HttpServerOptions = {}): Promise<
       }
 
       req.auth = withHostedContext(auth.info, hostedContext);
-      await transport.handleRequest(req, res, parsedBody);
+      const session = await resolveMcpSession({
+        req,
+        res,
+        parsedBody,
+        sessions,
+        createOpenAIAdsMcpServer,
+      });
+      if (!session) {
+        return;
+      }
+      await session.transport.handleRequest(req, res, parsedBody);
       emitMcpRequestTelemetry({
         context: hostedContext,
         summary: requestSummary,
@@ -226,12 +249,110 @@ export async function startHttpServer(options: HttpServerOptions = {}): Promise<
   return {
     url,
     close: async () => {
-      await mcpServer.close();
+      await Promise.all([...sessions.values()].map((session) => closeMcpSession(session, sessions)));
       await new Promise<void>((resolve, reject) => {
         httpServer.close((error) => (error ? reject(error) : resolve()));
       });
     },
   };
+}
+
+async function resolveMcpSession(input: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  parsedBody: unknown;
+  sessions: Map<string, McpSession>;
+  createOpenAIAdsMcpServer: CreateMcpServer;
+}): Promise<McpSession | null> {
+  await sweepExpiredSessions(input.sessions);
+  const sessionId = singleHeader(input.req, "mcp-session-id");
+  if (sessionId) {
+    const session = input.sessions.get(sessionId);
+    if (!session) {
+      writeJson(input.res, 404, jsonRpcError(-32001, "Session not found"));
+      return null;
+    }
+    session.lastSeenAt = Date.now();
+    return session;
+  }
+
+  if (input.req.method === "POST" && containsInitializeRequest(input.parsedBody)) {
+    return createMcpSession(input.createOpenAIAdsMcpServer, input.sessions);
+  }
+
+  writeJson(input.res, 400, jsonRpcError(-32000, "Bad Request: Mcp-Session-Id header is required"));
+  return null;
+}
+
+async function createMcpSession(createOpenAIAdsMcpServer: CreateMcpServer, sessions: Map<string, McpSession>): Promise<McpSession> {
+  let session: McpSession;
+  const mcpServer = createOpenAIAdsMcpServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (sessionId) => {
+      session.id = sessionId;
+      session.lastSeenAt = Date.now();
+      sessions.set(sessionId, session);
+    },
+    onsessionclosed: (sessionId) => {
+      const current = sessions.get(sessionId);
+      if (current) {
+        void closeMcpSession(current, sessions);
+      }
+    },
+  });
+  session = {
+    mcpServer,
+    transport,
+    closing: false,
+    lastSeenAt: Date.now(),
+  };
+  transport.onclose = () => {
+    if (session.id) {
+      sessions.delete(session.id);
+    }
+  };
+  await mcpServer.connect(transport);
+  return session;
+}
+
+async function closeMcpSession(session: McpSession, sessions: Map<string, McpSession>): Promise<void> {
+  if (session.closing) {
+    return;
+  }
+  session.closing = true;
+  if (session.id) {
+    sessions.delete(session.id);
+  }
+  await Promise.allSettled([
+    session.transport.close(),
+    session.mcpServer.close(),
+  ]);
+}
+
+function containsInitializeRequest(body: unknown): boolean {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.some((message) => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      return false;
+    }
+    return (message as Record<string, unknown>).method === "initialize";
+  });
+}
+
+function jsonRpcError(code: number, message: string): Record<string, unknown> {
+  return {
+    jsonrpc: "2.0",
+    error: { code, message },
+    id: null,
+  };
+}
+
+async function sweepExpiredSessions(sessions: Map<string, McpSession>): Promise<void> {
+  const ttlMs = parsePositiveInt(process.env.OPENAI_ADS_MCP_HTTP_SESSION_TTL_MS, 30 * 60 * 1000);
+  const cutoff = Date.now() - ttlMs;
+  const expired = [...sessions.values()].filter((session) => session.lastSeenAt < cutoff);
+  await Promise.all(expired.map((session) => closeMcpSession(session, sessions)));
 }
 
 function requestAuth(req: IncomingMessage):
@@ -244,7 +365,7 @@ function requestAuth(req: IncomingMessage):
 
   const openaiAdsApiKey = singleHeader(req, "x-openai-ads-api-key");
   const openaiAdsApiBaseUrl = singleHeader(req, "x-openai-ads-api-base-url");
-  if (isHostedPublicMode() && openaiAdsApiBaseUrl) {
+  if (openaiAdsApiBaseUrl && !isHttpBaseUrlOverrideAllowed()) {
     return { ok: false, status: 400, code: "openai_ads_api_base_url_not_allowed" };
   }
   if ((openaiAdsApiKey && openaiAdsApiKey.length > 400) || (openaiAdsApiBaseUrl && openaiAdsApiBaseUrl.length > 300)) {
@@ -256,10 +377,10 @@ function requestAuth(req: IncomingMessage):
     info: {
       token: requiredToken ? "mcp-http-token" : "anonymous",
       clientId: "openai-ads-mcp-http",
-      scopes: truthy(process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES) ? ["ads:read", "ads:write"] : ["ads:read"],
+      scopes: isHttpWriteModeAllowed() ? ["ads:read", "ads:write"] : ["ads:read"],
       extra: {
         ...(openaiAdsApiKey ? { openaiAdsApiKey } : {}),
-        ...(openaiAdsApiBaseUrl ? { openaiAdsApiBaseUrl } : {}),
+        ...(openaiAdsApiBaseUrl && isHttpBaseUrlOverrideAllowed() ? { openaiAdsApiBaseUrl } : {}),
       },
     },
     ...(openaiAdsApiKey ? { openaiAdsApiKey } : {}),
@@ -320,15 +441,66 @@ function parsePort(value: string | undefined): number {
   return 8080;
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function setCorsHeaders(res: ServerResponse): void {
   const origin = process.env.OPENAI_ADS_MCP_HTTP_CORS_ORIGIN?.trim() || "*";
+  const allowedHeaders = [
+    "Authorization",
+    "Content-Type",
+    "Mcp-Protocol-Version",
+    "Mcp-Session-Id",
+    "X-OpenAI-Ads-API-Key",
+    ...(isHttpBaseUrlOverrideAllowed() ? ["X-OpenAI-Ads-API-Base-Url"] : []),
+  ];
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Authorization,Content-Type,Mcp-Protocol-Version,Mcp-Session-Id,X-OpenAI-Ads-API-Key,X-OpenAI-Ads-API-Base-Url",
-  );
+  res.setHeader("Access-Control-Allow-Headers", allowedHeaders.join(","));
   res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+}
+
+function originOk(req: IncomingMessage): boolean {
+  const origin = singleHeader(req, "origin");
+  if (!origin) {
+    return true;
+  }
+  const allowedOrigins = configuredAllowedOrigins();
+  if (allowedOrigins.has("*") || allowedOrigins.has(origin)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(origin);
+    const host = singleHeader(req, "host").split(":")[0]?.toLowerCase();
+    if (host && parsed.hostname.toLowerCase() === host) {
+      return true;
+    }
+    return isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function configuredAllowedOrigins(): Set<string> {
+  const values = new Set<string>();
+  for (const raw of (process.env.OPENAI_ADS_MCP_HTTP_ALLOWED_ORIGINS ?? "").split(",")) {
+    const value = raw.trim();
+    if (value) {
+      values.add(value);
+    }
+  }
+  const corsOrigin = process.env.OPENAI_ADS_MCP_HTTP_CORS_ORIGIN?.trim();
+  if (corsOrigin && corsOrigin !== "*") {
+    values.add(corsOrigin);
+  }
+  return values;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized.endsWith(".localhost");
 }
 
 function writeJson(res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}): void {
@@ -387,8 +559,8 @@ function serverCard(): Record<string, unknown> {
   return {
     name: "io.github.trakkr-aisearch/openai-ads-mcp",
     title: "OpenAI Ads MCP",
-    description: "Read-only hosted MCP endpoint for OpenAI Ads and ChatGPT Ads discovery and insights. Users provide their own OpenAI Ads API key per request.",
-    version: "0.1.6",
+    description: "Read-only hosted OpenAI Ads MCP endpoint for ChatGPT Ads discovery and insights. Users provide their own OpenAI Ads API key per request.",
+    version: "0.1.7",
     protocol: "mcp",
     transport: {
       type: "streamable-http",
@@ -464,7 +636,7 @@ function hostedDiscoveryResponse(body: unknown, tools: AdsToolDefinition[]): Rec
             resources: { listChanged: true },
             tools: { listChanged: true },
           },
-          serverInfo: { name: "OpenAI Ads", version: "0.1.6" },
+          serverInfo: { name: "OpenAI Ads", version: "0.1.7" },
           instructions: INSTRUCTIONS,
         },
       });
@@ -477,12 +649,7 @@ function hostedDiscoveryResponse(body: unknown, tools: AdsToolDefinition[]): Rec
             name: tool.name,
             description: tool.description,
             inputSchema: zodToJsonSchema(z.object(tool.inputSchema)),
-            annotations: {
-              readOnlyHint: !tool.writes,
-              destructiveHint: tool.destructive ?? false,
-              idempotentHint: tool.idempotent ?? !tool.writes,
-              openWorldHint: tool.openWorld ?? false,
-            },
+            annotations: toolAnnotations(tool),
           })),
         },
       });
@@ -505,10 +672,6 @@ function hostedDiscoveryResponse(body: unknown, tools: AdsToolDefinition[]): Rec
     return null;
   }
   return Array.isArray(body) ? responses : responses[0];
-}
-
-function truthy(value: string | undefined): boolean {
-  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
 }
 
 function errorName(error: unknown): string {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import hashlib
 import inspect
 import json
 import os
@@ -70,7 +71,7 @@ mcp = FastMCP(
         "Safety model:\n"
         "  1. Create tools default to paused. build_campaign creates every object paused.\n"
         "  2. Budget-setting tools enforce OPENAI_ADS_BUDGET_CEILING_USD, default 100 USD, unless confirm_budget=True.\n"
-        "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode write tools are not registered.\n"
+        "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode write actions are hidden, while conversion read actions remain available.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
         "Paid presence is half the picture. Track how your brand shows up organically across ChatGPT, Perplexity, Gemini and Claude at trakkr.ai."
     ),
@@ -261,6 +262,14 @@ def ads_tool(
 
     def decorator(fn):
         signature = inspect.signature(fn, eval_str=True)
+        readonly_actions = getattr(fn, "_openai_ads_readonly_actions", None)
+        readonly_variant = writes and is_readonly_mode() and bool(readonly_actions)
+        active_annotations = ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=open_world,
+        ) if readonly_variant else annotations
 
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -268,10 +277,17 @@ def ads_tool(
 
         wrapper.__signature__ = signature
         wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))
-        if writes and is_readonly_mode():
+        if writes and is_readonly_mode() and not readonly_actions:
             return wrapper
-        return mcp.tool(annotations=annotations, structured_output=False)(wrapper)
+        return mcp.tool(annotations=active_annotations, structured_output=False)(wrapper)
 
+    return decorator
+
+
+def readonly_actions(*actions: str):
+    def decorator(fn):
+        fn._openai_ads_readonly_actions = frozenset(actions)
+        return fn
     return decorator
 
 
@@ -415,6 +431,36 @@ def _budget_guard(budget_usd: float, confirm_budget: bool) -> str | None:
     return None
 
 
+def _validate_idempotency_key(value: str | None) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or not value.strip():
+        return None, _bad_request("idempotency_key must contain at least one non-whitespace character.")
+    key = value.strip()
+    if len(key) > 255:
+        return None, _bad_request("idempotency_key must be at most 255 characters.")
+    return key, None
+
+
+def _child_idempotency_key(parent: str | None, suffix: str) -> str | None:
+    if not parent:
+        return None
+    safe_suffix = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in suffix)[:80] or "child"
+    candidate = f"{parent}:{safe_suffix}"
+    if len(candidate) <= 255:
+        return candidate
+    digest = hashlib.sha256(f"{parent}:{safe_suffix}".encode("utf-8")).hexdigest()[:32]
+    return f"openai-ads-mcp:{safe_suffix}:{digest}"
+
+
+def _reject_activation_status(status: str | None, context: str) -> str | None:
+    if status == "active":
+        return _bad_request(
+            f"{context} does not accept status='active'. Use the matching set_*_state tool to activate explicitly after review."
+        )
+    return None
+
+
 def _validate_unix_time(name: str, value: int | None) -> str | None:
     if value is None:
         return None
@@ -446,6 +492,7 @@ __all__ = (
     "Literal",
     "copy",
     "functools",
+    "hashlib",
     "inspect",
     "json",
     "os",
@@ -474,6 +521,7 @@ __all__ = (
     "_err",
     "_bad_request",
     "ads_tool",
+    "readonly_actions",
     "is_readonly_mode",
     "_get_client_or_error",
     "_validate_int_range",
@@ -489,6 +537,9 @@ __all__ = (
     "_optional_params",
     "_usd_to_micros",
     "_budget_guard",
+    "_validate_idempotency_key",
+    "_child_idempotency_key",
+    "_reject_activation_status",
     "_budget_ceiling_usd",
     "_validate_unix_time",
     "_extract_id",

@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { INSTRUCTIONS, isReadonlyMode, registerAdsTool, type AdsToolDefinition } from "./core.js";
+import { INSTRUCTIONS, registerAdsTool, shouldRegisterTool, type AdsToolDefinition } from "./core.js";
 import { helperTools } from "./helpers.js";
 import { startHttpServer } from "./http.js";
 import { registerTrakkrVisibilityResource } from "./resource_trakkr.js";
@@ -28,7 +28,7 @@ export const allToolDefinitions: AdsToolDefinition[] = [
 ];
 
 export function registeredToolDefinitions(): AdsToolDefinition[] {
-  return allToolDefinitions.filter((tool) => !(tool.writes && isReadonlyMode()));
+  return allToolDefinitions.filter((tool) => shouldRegisterTool(tool));
 }
 
 export function registeredToolMetadata(): Array<{ name: string; args: string[] }> {
@@ -39,7 +39,7 @@ export function createOpenAIAdsMcpServer(): McpServer {
   const server = new McpServer(
     {
       name: "OpenAI Ads",
-      version: "0.1.6",
+      version: "0.1.7",
     },
     {
       instructions: INSTRUCTIONS,

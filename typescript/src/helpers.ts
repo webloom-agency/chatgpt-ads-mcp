@@ -3,6 +3,7 @@ import { z } from "zod";
 import { OpenAIAdsAPIError } from "./client.js";
 import {
   badRequest,
+  childIdempotencyKey,
   coerceList,
   coerceMapping,
   coerceStringList,
@@ -11,6 +12,7 @@ import {
   handleApiError,
   isRecord,
   ok,
+  validateIdempotencyKey,
   validateNonEmpty,
   type AdsToolDefinition,
   type JsonRecord,
@@ -35,10 +37,20 @@ async function buildCampaign(args: ToolArgs): Promise<string> {
   const [adPayloads, adsParseError] = coerceList(args.ads, "ads");
   if (adsParseError) return adsParseError;
   if (!adPayloads?.length) return badRequest("ads must include at least one ad.");
+  const [idempotencyKey, idempotencyError] = validateIdempotencyKey(args.idempotency_key);
+  if (idempotencyError) return idempotencyError;
+  const hasProductSet = groupPayload?.product_set !== undefined && groupPayload?.product_set !== null;
+  const conversionOptimized = args.bidding_type === "conversions";
+  if (conversionOptimized && groupPayload?.billing_event !== "click") {
+    return badRequest("Conversion-optimized campaign ad groups must use billing_event='click'. The bid is your CPA input even though billing remains per click.");
+  }
   const [campaignBody, campaignError] = buildCampaignBody({
     name: args.name,
     budget_usd: args.budget_usd,
     status: "paused",
+    mode: hasProductSet ? "product_feed" : undefined,
+    bidding_type: args.bidding_type as string | undefined,
+    conversion_event_setting_ids: args.conversion_event_setting_id ? [args.conversion_event_setting_id] : undefined,
     confirm_budget: args.confirm_budget,
     create: true,
   });
@@ -51,7 +63,8 @@ async function buildCampaign(args: ToolArgs): Promise<string> {
     ads: [],
   };
   try {
-    const campaign = await client!.post("/campaigns", campaignBody!);
+    const campaignKey = childIdempotencyKey(idempotencyKey, "campaign");
+    const campaign = await client!.post("/campaigns", campaignBody!, campaignKey ? { idempotencyKey: campaignKey } : undefined);
     created.campaign = campaign;
     const campaignId = extractId(campaign, "id", "campaign_id");
     if (!campaignId) {
@@ -64,12 +77,14 @@ async function buildCampaign(args: ToolArgs): Promise<string> {
       max_bid_usd: groupPayload?.max_bid_usd,
       status: "paused",
       context_hints: groupPayload?.context_hints,
+      product_set: groupPayload?.product_set,
       create: true,
     });
     if (adGroupError) {
       return ok({ created, error: parseToolError(adGroupError) });
     }
-    const adGroup = await client!.post("/ad_groups", adGroupBody!);
+    const adGroupKey = childIdempotencyKey(idempotencyKey, "ad_group");
+    const adGroup = await client!.post("/ad_groups", adGroupBody!, adGroupKey ? { idempotencyKey: adGroupKey } : undefined);
     created.ad_group = adGroup;
     const adGroupId = extractId(adGroup, "id", "ad_group_id");
     if (!adGroupId) {
@@ -94,7 +109,8 @@ async function buildCampaign(args: ToolArgs): Promise<string> {
       if (adError) {
         return ok({ created, error: parseToolError(adError) });
       }
-      created.ads.push(await client!.post("/ads", adBody!));
+      const adKey = childIdempotencyKey(idempotencyKey, `ad_${index}`);
+      created.ads.push(await client!.post("/ads", adBody!, adKey ? { idempotencyKey: adKey } : undefined));
     }
     return ok({
       created,
@@ -147,6 +163,8 @@ async function bulkAbTestHints(args: ToolArgs): Promise<string> {
   if (variantsError) return variantsError;
   if (!parsed?.length) return badRequest("variants must include at least one variant.");
   if (parsed.length > 20) return badRequest("Create at most 20 variants per A/B test batch.");
+  const [idempotencyKey, idempotencyError] = validateIdempotencyKey(args.idempotency_key);
+  if (idempotencyError) return idempotencyError;
   const { client, error } = getClientOrError();
   if (error) return error;
   const created: JsonRecord[] = [];
@@ -170,7 +188,8 @@ async function bulkAbTestHints(args: ToolArgs): Promise<string> {
       if (adError) {
         return ok({ created, error: parseToolError(adError) });
       }
-      created.push(await client!.post("/ads", adBody!));
+      const adKey = childIdempotencyKey(idempotencyKey, `ad_${index}`);
+      created.push(await client!.post("/ads", adBody!, adKey ? { idempotencyKey: adKey } : undefined));
     }
     return ok({
       created_ads: created,
@@ -194,9 +213,12 @@ export const helperTools: AdsToolDefinition[] = [
       budget_usd: z.number(),
       ad_group: z.any(),
       ads: z.any(),
+      bidding_type: z.enum(["impressions", "clicks", "conversions"]).optional(),
+      conversion_event_setting_id: z.string().optional(),
       confirm_budget: z.boolean().default(false),
+      idempotency_key: z.string().optional(),
     },
-    argNames: ["name", "budget_usd", "ad_group", "ads", "confirm_budget"],
+    argNames: ["name", "budget_usd", "ad_group", "ads", "bidding_type", "conversion_event_setting_id", "confirm_budget", "idempotency_key"],
     writes: true,
     destructive: true,
     openWorld: true,
@@ -220,9 +242,11 @@ export const helperTools: AdsToolDefinition[] = [
     inputSchema: {
       ad_group_id: z.string(),
       variants: z.any(),
+      idempotency_key: z.string().optional(),
     },
-    argNames: ["ad_group_id", "variants"],
+    argNames: ["ad_group_id", "variants", "idempotency_key"],
     writes: true,
+    openWorld: true,
     handler: bulkAbTestHints,
   },
 ];

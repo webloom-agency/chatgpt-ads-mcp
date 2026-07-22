@@ -4,12 +4,15 @@ import {
   badRequest,
   budgetGuard,
   coerceList,
+  coerceStringList,
   getClientOrError,
   handleApiError,
   isRecord,
   ok,
   optionalParams,
+  rejectActivationStatus,
   usdToMicros,
+  validateIdempotencyKey,
   validateIntRange,
   validateNonEmpty,
   validateOption,
@@ -21,6 +24,7 @@ import {
 
 const CAMPAIGN_STATES = new Set(["activate", "pause", "archive"]);
 const CAMPAIGN_STATUSES = new Set(["active", "paused", "archived"]);
+const CAMPAIGN_BIDDING_TYPES = new Set(["impressions", "clicks", "conversions"]);
 
 export function locationsPayload(locations: unknown): [JsonRecord | null, string | null] {
   if (locations === undefined || locations === null) return [null, null];
@@ -48,6 +52,8 @@ export function buildCampaignBody(input: {
   start_time?: unknown;
   end_time?: unknown;
   mode?: string;
+  bidding_type?: string;
+  conversion_event_setting_ids?: unknown;
   locations?: unknown;
   confirm_budget?: unknown;
   create?: boolean;
@@ -64,6 +70,8 @@ export function buildCampaignBody(input: {
   const status = input.status ?? (create ? "paused" : undefined);
   if (status !== undefined) {
     if (!CAMPAIGN_STATUSES.has(status)) return [null, badRequest("status must be active, paused, or archived.")];
+    const activationError = rejectActivationStatus(status, create ? "create_campaign" : "update_campaign");
+    if (activationError) return [null, activationError];
     if (create && status !== "paused") {
       return [null, badRequest("Create tools only create paused campaigns. Use set_campaign_state after review.")];
     }
@@ -88,8 +96,37 @@ export function buildCampaignBody(input: {
     return [null, badRequest("end_time must be after start_time.")];
   }
   if (input.mode !== undefined && input.mode !== null) {
+    if (!create) return [null, badRequest("mode cannot be changed after campaign creation.")];
     if (input.mode !== "product_feed") return [null, badRequest("mode must be product_feed when provided.")];
     body.mode = input.mode;
+  }
+  if (input.bidding_type !== undefined && input.bidding_type !== null) {
+    if (!create) return [null, badRequest("bidding_type cannot be changed after campaign creation.")];
+    if (!CAMPAIGN_BIDDING_TYPES.has(input.bidding_type)) {
+      return [null, badRequest("bidding_type must be impressions, clicks, or conversions.")];
+    }
+    body.bidding_type = input.bidding_type;
+  }
+  const [conversionEventSettingIds, conversionIdsError] = coerceStringList(
+    input.conversion_event_setting_ids,
+    "conversion_event_setting_ids",
+  );
+  if (conversionIdsError) return [null, conversionIdsError];
+  if (conversionEventSettingIds) {
+    if (conversionEventSettingIds.length !== 1) {
+      return [null, badRequest("conversion_event_setting_ids must contain exactly one event setting id.")];
+    }
+    body.conversion_event_setting_ids = conversionEventSettingIds;
+  }
+  if (create && input.bidding_type === "conversions") {
+    if (input.mode === "product_feed") {
+      return [null, badRequest("Conversion-optimized campaigns cannot use product_feed mode.")];
+    }
+    if (!conversionEventSettingIds) {
+      return [null, badRequest("bidding_type='conversions' requires exactly one conversion_event_setting_ids value.")];
+    }
+  } else if (create && conversionEventSettingIds) {
+    return [null, badRequest("conversion_event_setting_ids requires bidding_type='conversions' when creating a campaign.")];
   }
   const [targeting, targetingError] = locationsPayload(input.locations);
   if (targetingError) return [null, targetingError];
@@ -126,10 +163,12 @@ async function getCampaign(args: ToolArgs): Promise<string> {
 async function createCampaign(args: ToolArgs): Promise<string> {
   const [body, bodyError] = buildCampaignBody({ ...args, status: String(args.status ?? "paused"), create: true });
   if (bodyError) return bodyError;
+  const [idempotencyKey, idempotencyError] = validateIdempotencyKey(args.idempotency_key);
+  if (idempotencyError) return idempotencyError;
   const { client, error } = getClientOrError();
   if (error) return error;
   try {
-    return ok(await client!.post("/campaigns", body!));
+    return ok(await client!.post("/campaigns", body!, idempotencyKey ? { idempotencyKey } : undefined));
   } catch (apiError) {
     return handleApiError(apiError);
   }
@@ -165,8 +204,8 @@ async function setCampaignState(args: ToolArgs): Promise<string> {
 }
 
 const orderSchema = z.enum(["asc", "desc"]).default("desc");
-const campaignStatusSchema = z.enum(["paused", "active"]).default("paused");
-const updateCampaignStatusSchema = z.enum(["active", "paused", "archived"]).optional();
+const campaignStatusSchema = z.enum(["paused"]).default("paused");
+const updateCampaignStatusSchema = z.enum(["paused", "archived"]).optional();
 
 export const campaignTools: AdsToolDefinition[] = [
   {
@@ -179,6 +218,7 @@ export const campaignTools: AdsToolDefinition[] = [
       order: orderSchema,
     },
     argNames: ["limit", "after", "before", "order"],
+    openWorld: true,
     handler: listCampaigns,
   },
   {
@@ -186,6 +226,7 @@ export const campaignTools: AdsToolDefinition[] = [
     description: "Get one campaign by id.",
     inputSchema: { campaign_id: z.string() },
     argNames: ["campaign_id"],
+    openWorld: true,
     handler: getCampaign,
   },
   {
@@ -199,10 +240,13 @@ export const campaignTools: AdsToolDefinition[] = [
       start_time: z.number().int().optional(),
       end_time: z.number().int().optional(),
       mode: z.enum(["product_feed"]).optional(),
+      bidding_type: z.enum(["impressions", "clicks", "conversions"]).optional(),
+      conversion_event_setting_ids: z.any().optional(),
       locations: z.any().optional(),
       confirm_budget: z.boolean().default(false),
+      idempotency_key: z.string().optional(),
     },
-    argNames: ["name", "budget_usd", "status", "description", "start_time", "end_time", "mode", "locations", "confirm_budget"],
+    argNames: ["name", "budget_usd", "status", "description", "start_time", "end_time", "mode", "bidding_type", "conversion_event_setting_ids", "locations", "confirm_budget", "idempotency_key"],
     writes: true,
     destructive: true,
     openWorld: true,
@@ -219,11 +263,11 @@ export const campaignTools: AdsToolDefinition[] = [
       description: z.string().optional(),
       start_time: z.number().int().optional(),
       end_time: z.number().int().optional(),
-      mode: z.enum(["product_feed"]).optional(),
+      conversion_event_setting_ids: z.any().optional(),
       locations: z.any().optional(),
       confirm_budget: z.boolean().default(false),
     },
-    argNames: ["campaign_id", "name", "budget_usd", "status", "description", "start_time", "end_time", "mode", "locations", "confirm_budget"],
+    argNames: ["campaign_id", "name", "budget_usd", "status", "description", "start_time", "end_time", "conversion_event_setting_ids", "locations", "confirm_budget"],
     writes: true,
     destructive: true,
     openWorld: true,

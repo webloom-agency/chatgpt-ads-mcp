@@ -9,7 +9,7 @@ const PUBLIC_PATHS = new Set([
 ]);
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     const incomingUrl = new URL(request.url);
 
     if (!PUBLIC_PATHS.has(incomingUrl.pathname)) {
@@ -30,6 +30,9 @@ export default {
     headers.delete("host");
     headers.set("x-forwarded-host", incomingUrl.host);
     headers.set("x-trakkr-edge", "cloudflare-worker");
+    if (env.OPENAI_ADS_MCP_EDGE_SECRET) {
+      headers.set("x-trakkr-edge-secret", env.OPENAI_ADS_MCP_EDGE_SECRET);
+    }
 
     const response = await fetch(originUrl, {
       body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,

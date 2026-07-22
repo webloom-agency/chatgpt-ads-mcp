@@ -120,6 +120,7 @@ export const audienceTools: AdsToolDefinition[] = [
     description: "List custom audiences for the authenticated ad account.",
     inputSchema: { limit: z.number().int().default(20), after: z.string().optional(), before: z.string().optional(), order: orderSchema },
     argNames: ["limit", "after", "before", "order"],
+    openWorld: true,
     handler: listAudiences,
   },
   {
@@ -127,6 +128,7 @@ export const audienceTools: AdsToolDefinition[] = [
     description: "Get one custom audience by id.",
     inputSchema: { audience_id: z.string() },
     argNames: ["audience_id"],
+    openWorld: true,
     handler: getAudience,
   },
   {
@@ -134,6 +136,7 @@ export const audienceTools: AdsToolDefinition[] = [
     description: "Search geo targets for targeting.locations.include and return ids usable in campaign targeting.",
     inputSchema: { query: z.string() },
     argNames: ["query"],
+    openWorld: true,
     handler: searchGeo,
   },
   {
@@ -154,6 +157,7 @@ export const audienceTools: AdsToolDefinition[] = [
     argNames: ["action", "name", "description", "members", "audience_id", "file_id", "identifier_type", "filename", "mimetype", "file_size"],
     writes: true,
     destructive: true,
+    openWorld: true,
     handler: manageAudience,
   },
 ];

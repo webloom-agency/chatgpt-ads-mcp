@@ -7,6 +7,9 @@ import test, { afterEach, beforeEach } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 import { OpenAIAdsAPIError, OpenAIAdsClient } from "../dist/client.js";
 import {
@@ -28,18 +31,18 @@ const manifest = JSON.parse(await readFile(new URL("../../mcpToolManifest.json",
 const expectedNames = manifest.tools.map((tool) => tool.name);
 
 const expectedArgMap = new Map(Object.entries({
-  build_campaign: ["name", "budget_usd", "ad_group", "ads", "confirm_budget"],
-  bulk_ab_test_hints: ["ad_group_id", "variants"],
-  create_ad: ["ad_group_id", "name", "creative_type", "title", "body", "target_url", "file_id", "price", "status"],
-  create_ad_group: ["campaign_id", "name", "billing_event", "max_bid_usd", "status", "context_hints"],
-  create_campaign: ["name", "budget_usd", "status", "description", "start_time", "end_time", "mode", "locations", "confirm_budget"],
+  build_campaign: ["name", "budget_usd", "ad_group", "ads", "bidding_type", "conversion_event_setting_id", "confirm_budget", "idempotency_key"],
+  bulk_ab_test_hints: ["ad_group_id", "variants", "idempotency_key"],
+  create_ad: ["ad_group_id", "name", "creative_type", "title", "body", "target_url", "file_id", "price", "status", "idempotency_key"],
+  create_ad_group: ["campaign_id", "name", "billing_event", "max_bid_usd", "status", "context_hints", "product_set", "idempotency_key"],
+  create_campaign: ["name", "budget_usd", "status", "description", "start_time", "end_time", "mode", "bidding_type", "conversion_event_setting_ids", "locations", "confirm_budget", "idempotency_key"],
   draft_context_hints: ["product", "audience", "intent", "keywords"],
   get_account: [],
   get_ad: ["ad_id"],
   get_ad_group: ["ad_group_id"],
   get_audience: ["audience_id"],
   get_campaign: ["campaign_id"],
-  get_insights: ["scope", "entity_id", "time_granularity", "time_range", "segments", "fields", "filters", "sort", "limit", "after", "before", "response_format"],
+  get_insights: ["scope", "entity_id", "time_granularity", "aggregation_level", "time_range", "segments", "override_segment_group_order", "includes", "fields", "filters", "sort", "limit", "after", "before", "response_format"],
   list_ad_groups: ["campaign_id", "limit", "after", "before", "order"],
   list_ads: ["ad_group_id", "limit", "after", "before", "order"],
   list_audiences: ["limit", "after", "before", "order"],
@@ -47,13 +50,13 @@ const expectedArgMap = new Map(Object.entries({
   manage_audience: ["action", "name", "description", "members", "audience_id", "file_id", "identifier_type", "filename", "mimetype", "file_size"],
   manage_conversions: ["action", "name", "client_type", "event_type", "custom_event_name", "attribution_window_days", "source_ids", "aggregation_level", "time_ranges", "entity_ids", "limit", "after", "before", "order"],
   search_geo: ["query"],
-  send_conversions: ["pixel_id", "events"],
+  send_conversions: ["pixel_id", "events", "validate_only"],
   set_ad_group_state: ["ad_group_id", "state"],
   set_ad_state: ["ad_id", "state"],
   set_campaign_state: ["campaign_id", "state"],
   update_ad: ["ad_id", "name", "creative_type", "title", "body", "target_url", "file_id", "price", "status"],
-  update_ad_group: ["ad_group_id", "name", "billing_event", "max_bid_usd", "status", "context_hints"],
-  update_campaign: ["campaign_id", "name", "budget_usd", "status", "description", "start_time", "end_time", "mode", "locations", "confirm_budget"],
+  update_ad_group: ["ad_group_id", "name", "billing_event", "max_bid_usd", "status", "context_hints", "product_set"],
+  update_campaign: ["campaign_id", "name", "budget_usd", "status", "description", "start_time", "end_time", "conversion_event_setting_ids", "locations", "confirm_budget"],
   upload_creative: ["image_url", "file_path"],
 }));
 
@@ -86,14 +89,35 @@ const expectedDestructiveTools = new Set([
 ]);
 
 const expectedOpenWorldTools = new Set([
+  "get_account",
+  "list_campaigns",
+  "get_campaign",
   "create_campaign",
   "update_campaign",
   "set_campaign_state",
+  "list_ad_groups",
+  "get_ad_group",
+  "create_ad_group",
+  "update_ad_group",
   "set_ad_group_state",
+  "list_ads",
+  "get_ad",
+  "upload_creative",
+  "create_ad",
+  "update_ad",
   "set_ad_state",
+  "get_insights",
+  "list_audiences",
+  "get_audience",
+  "search_geo",
+  "manage_audience",
+  "manage_conversions",
   "send_conversions",
   "build_campaign",
+  "bulk_ab_test_hints",
 ]);
+
+const expectedReadonlyWriteTools = new Set(["manage_conversions"]);
 
 const usedOpenAIAdsPaths = new Set([
   "/ad_account",
@@ -140,8 +164,13 @@ function makeMockClient(options = {}) {
       calls.push({ method: "get", path, params });
       return { ok: true, data: [] };
     },
-    async post(path, body) {
-      calls.push({ method: "post", path, body });
+    async post(path, body, options) {
+      calls.push({
+        method: "post",
+        path,
+        body,
+        ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+      });
       const next = postResponses.length ? postResponses.shift() : { ok: true, id: "created" };
       if (next instanceof Error) throw next;
       return next;
@@ -150,8 +179,8 @@ function makeMockClient(options = {}) {
       calls.push({ method: "uploadFile", path, filePath });
       return { file_id: "file_123" };
     },
-    async postConversions(pixelId, events) {
-      calls.push({ method: "postConversions", pixelId, events });
+    async postConversions(pixelId, events, validateOnly = false) {
+      calls.push({ method: "postConversions", pixelId, events, validateOnly });
       return { ok: true, received: events.length };
     },
   };
@@ -161,6 +190,10 @@ function tool(name) {
   const found = allToolDefinitions.find((definition) => definition.name === name);
   assert.ok(found, `Missing tool ${name}`);
   return found;
+}
+
+function jsonSchemaForTool(name) {
+  return zodToJsonSchema(z.object(tool(name).inputSchema));
 }
 
 async function callTool(name, args = {}) {
@@ -199,6 +232,10 @@ beforeEach(() => {
   delete process.env.OPENAI_ADS_BUDGET_CEILING_USD;
   delete process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES;
   delete process.env.OPENAI_ADS_MCP_HTTP_TOKEN;
+  delete process.env.OPENAI_ADS_MCP_HTTP_ALLOW_BASE_URL_OVERRIDE;
+  delete process.env.OPENAI_ADS_MCP_HTTP_ALLOW_FILE_PATH_UPLOADS;
+  delete process.env.OPENAI_ADS_MCP_HTTP_SESSION_TTL_MS;
+  delete process.env.OPENAI_ADS_MCP_HTTP_ALLOWED_ORIGINS;
   delete process.env.OPENAI_ADS_MCP_HOSTED_PUBLIC;
   delete process.env.OPENAI_ADS_MCP_HOSTED_DISABLED;
   delete process.env.OPENAI_ADS_MCP_TELEMETRY_SALT;
@@ -215,6 +252,10 @@ afterEach(() => {
   delete process.env.OPENAI_ADS_BUDGET_CEILING_USD;
   delete process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES;
   delete process.env.OPENAI_ADS_MCP_HTTP_TOKEN;
+  delete process.env.OPENAI_ADS_MCP_HTTP_ALLOW_BASE_URL_OVERRIDE;
+  delete process.env.OPENAI_ADS_MCP_HTTP_ALLOW_FILE_PATH_UPLOADS;
+  delete process.env.OPENAI_ADS_MCP_HTTP_SESSION_TTL_MS;
+  delete process.env.OPENAI_ADS_MCP_HTTP_ALLOWED_ORIGINS;
   delete process.env.OPENAI_ADS_MCP_HOSTED_PUBLIC;
   delete process.env.OPENAI_ADS_MCP_HOSTED_DISABLED;
   delete process.env.OPENAI_ADS_MCP_TELEMETRY_SALT;
@@ -249,7 +290,15 @@ test("readonly mode hides write tools", () => {
   assert.ok(names.has("draft_context_hints"));
   assert.ok(!names.has("create_campaign"));
   assert.ok(!names.has("send_conversions"));
-  assert.equal([...names].some((name) => expectedWriteTools.has(name)), false);
+  assert.ok(names.has("manage_conversions"));
+  assert.equal([...names].some((name) => expectedWriteTools.has(name) && !expectedReadonlyWriteTools.has(name)), false);
+});
+
+test("create schemas only advertise paused status", () => {
+  for (const name of ["create_campaign", "create_ad_group", "create_ad"]) {
+    const schema = jsonSchemaForTool(name);
+    assert.deepEqual(schema.properties.status.enum, ["paused"], `${name} should only advertise paused creation`);
+  }
 });
 
 test("stdio readonly server lists only read tools", async () => {
@@ -272,7 +321,8 @@ test("stdio readonly server lists only read tools", async () => {
     assert.ok(names.has("get_account"));
     assert.ok(names.has("draft_context_hints"));
     assert.ok(!names.has("create_campaign"));
-    assert.equal([...names].some((name) => expectedWriteTools.has(name)), false);
+    assert.ok(names.has("manage_conversions"));
+    assert.equal([...names].some((name) => expectedWriteTools.has(name) && !expectedReadonlyWriteTools.has(name)), false);
   } finally {
     await client.close();
   }
@@ -311,6 +361,32 @@ test("http transport starts read-only by default and exposes health", async () =
   }
 });
 
+test("http transport works with SDK StreamableHTTPClientTransport sessions", async () => {
+  const handle = await startHttpServer({ host: "127.0.0.1", port: 0 });
+  const transport = new StreamableHTTPClientTransport(new URL(handle.url));
+  const client = new Client({ name: "openai-ads-mcp-http-test", version: "0.0.0" });
+  try {
+    await client.connect(transport);
+    assert.ok(transport.sessionId, "SDK client should receive an MCP session id");
+
+    const result = await client.listTools();
+    const names = new Set(result.tools.map((item) => item.name));
+    assert.ok(names.has("get_account"));
+    assert.ok(names.has("get_insights"));
+    assert.ok(!names.has("create_campaign"));
+
+    const failed = await client.callTool({
+      name: "get_insights",
+      arguments: { scope: "campaign" },
+    });
+    assert.equal(failed.isError, true);
+    assert.match(failed.content[0].text, /entity_id is required/);
+  } finally {
+    await client.close().catch(() => {});
+    await handle.close();
+  }
+});
+
 test("http transport rejects missing hosted bearer token", async () => {
   process.env.OPENAI_ADS_MCP_HTTP_TOKEN = "hosted_secret";
   const handle = await startHttpServer({ host: "127.0.0.1", port: 0 });
@@ -322,6 +398,61 @@ test("http transport rejects missing hosted bearer token", async () => {
     });
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { error: "unauthorized" });
+  } finally {
+    await handle.close();
+  }
+});
+
+test("http write mode requires bearer auth at startup", async () => {
+  process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES = "1";
+  await assert.rejects(
+    () => startHttpServer({ host: "127.0.0.1", port: 0 }),
+    /OPENAI_ADS_MCP_HTTP_TOKEN/,
+  );
+});
+
+test("http write mode rejects base-url overrides and file_path uploads by default", async () => {
+  process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES = "1";
+  process.env.OPENAI_ADS_MCP_HTTP_TOKEN = "hosted_secret";
+  const handle = await startHttpServer({ host: "127.0.0.1", port: 0 });
+  try {
+    const baseUrlOverride = await postJson(
+      handle.url,
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "test", version: "0" },
+        },
+      },
+      {
+        Authorization: "Bearer hosted_secret",
+        "X-OpenAI-Ads-API-Base-Url": "https://evil.example",
+      },
+    );
+    assert.equal(baseUrlOverride.status, 400);
+    assert.deepEqual(await baseUrlOverride.json(), { error: "openai_ads_api_base_url_not_allowed" });
+
+    const transport = new StreamableHTTPClientTransport(new URL(handle.url), {
+      requestInit: { headers: { Authorization: "Bearer hosted_secret" } },
+    });
+    const client = new Client({ name: "openai-ads-mcp-write-test", version: "0.0.0" });
+    try {
+      await client.connect(transport);
+      const tools = await client.listTools();
+      assert.ok(tools.tools.some((item) => item.name === "upload_creative"));
+      const failed = await client.callTool({
+        name: "upload_creative",
+        arguments: { file_path: "/etc/passwd" },
+      });
+      assert.equal(failed.isError, true);
+      assert.match(failed.content[0].text, /file_path uploads are disabled over HTTP/);
+    } finally {
+      await client.close().catch(() => {});
+    }
   } finally {
     await handle.close();
   }
@@ -375,7 +506,7 @@ test("hosted public mode exposes health, server card, and read-only tools", asyn
     });
     assert.equal(init.status, 200);
     const initBody = await readMcpJson(init);
-    assert.equal(initBody.result.serverInfo.version, "0.1.6");
+    assert.equal(initBody.result.serverInfo.version, "0.1.7");
 
     const list = await postJson(handle.url, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     assert.equal(list.status, 200);
@@ -383,7 +514,8 @@ test("hosted public mode exposes health, server card, and read-only tools", asyn
     const names = new Set(listBody.result.tools.map((item) => item.name));
     assert.ok(names.has("get_account"));
     assert.ok(!names.has("create_campaign"));
-    assert.equal([...names].some((name) => expectedWriteTools.has(name)), false);
+    assert.ok(names.has("manage_conversions"));
+    assert.equal([...names].some((name) => expectedWriteTools.has(name) && !expectedReadonlyWriteTools.has(name)), false);
   } finally {
     await handle.close();
   }
@@ -518,17 +650,19 @@ test("auth and read tools call the expected endpoints", async () => {
 
 test("get_insights covers all four scopes", async () => {
   const cases = [
-    ["account", undefined, "/ad_account/insights"],
-    ["campaign", "camp_1", "/campaigns/camp_1/insights"],
-    ["ad_group", "ag_1", "/ad_groups/ag_1/insights"],
-    ["ad", "ad_1", "/ads/ad_1/insights"],
+    ["account", undefined, "/ad_account/insights", "campaign"],
+    ["campaign", "camp_1", "/campaigns/camp_1/insights", "campaign"],
+    ["ad_group", "ag_1", "/ad_groups/ag_1/insights", "ad_group"],
+    ["ad", "ad_1", "/ads/ad_1/insights", "ad"],
   ];
-  for (const [scope, entityId, path] of cases) {
+  for (const [scope, entityId, path, aggregationLevel] of cases) {
     await callTool("get_insights", {
       scope,
       entity_id: entityId,
-      time_range: { unix_range: { start: 1764547200, end: 1765152000 } },
+      aggregation_level: aggregationLevel,
+      time_range: { type: "unix_range", start: 1764547200, end: 1765152000 },
       segments: "country",
+      override_segment_group_order: [aggregationLevel, "country"],
       fields: ["campaign.id", "metadata.readable_time"],
       filters: [{ field: "spend", operator: "GREATER_THAN", value: 10 }],
       sort: [{ field: "spend", direction: "desc" }],
@@ -537,14 +671,36 @@ test("get_insights covers all four scopes", async () => {
     const last = mockClient.calls.at(-1);
     assert.equal(last.path, path);
     assert.equal(last.params.time_granularity, "daily");
+    assert.equal(last.params.aggregation_level, aggregationLevel);
     assert.equal(last.params.limit, 100);
     assert.deepEqual(last.params.segments, ["country"]);
-    assert.equal(JSON.parse(last.params.time_ranges[0]).unix_range.start, 1764547200);
+    assert.deepEqual(last.params.override_segment_group_order, [aggregationLevel, "country"]);
+    assert.deepEqual(JSON.parse(last.params.time_ranges[0]), { type: "unix_range", start: 1764547200, end: 1765152000 });
     assert.equal(JSON.parse(last.params.filters[0]).operator, "GREATER_THAN");
     assert.equal(JSON.parse(last.params.sort[0]).direction, "desc");
   }
+  await callTool("get_insights", {
+    scope: "account",
+    aggregation_level: "ad_account",
+    time_granularity: "daily",
+    segments: ["product"],
+    override_segment_group_order: ["product", "ad_account"],
+    includes: ["zero_impression_products"],
+    fields: ["product.feed_id", "product.item_id", "product.clicks"],
+  });
+  assert.deepEqual(mockClient.calls.at(-1).params.includes, ["zero_impression_products"]);
   const data = await callTool("get_insights", { scope: "campaign" });
   assert.equal(data.error, true);
+
+  await callTool("get_insights", {
+    scope: "account",
+    time_range: { unix_range: { start: 1764547200, end: 1765152000 } },
+  });
+  assert.deepEqual(JSON.parse(mockClient.calls.at(-1).params.time_ranges[0]), {
+    type: "unix_range",
+    start: 1764547200,
+    end: 1765152000,
+  });
 });
 
 test("create_campaign defaults paused and applies budget guard", async () => {
@@ -559,6 +715,9 @@ test("create_campaign defaults paused and applies budget guard", async () => {
     },
   });
 
+  await callTool("create_campaign", { name: "Retry test", budget_usd: 25, idempotency_key: "campaign-create-1" });
+  assert.equal(mockClient.calls.at(-1).idempotencyKey, "campaign-create-1");
+
   mockClient.calls.length = 0;
   process.env.OPENAI_ADS_BUDGET_CEILING_USD = "10";
   const guarded = await callTool("create_campaign", { name: "Big test", budget_usd: 50 });
@@ -568,6 +727,33 @@ test("create_campaign defaults paused and applies budget guard", async () => {
 
   const active = await callTool("create_campaign", { name: "Launch test", budget_usd: 25, status: "active" });
   assert.equal(active.error, true);
+  const activeUpdate = await callTool("update_campaign", { campaign_id: "camp_1", status: "active" });
+  assert.equal(activeUpdate.error, true);
+  assert.match(activeUpdate.message, /set_\*_state/);
+
+  await callTool("create_campaign", {
+    name: "Conversion test",
+    budget_usd: 5,
+    bidding_type: "conversions",
+    conversion_event_setting_ids: ["event_setting_1"],
+  });
+  assert.equal(mockClient.calls.at(-1).body.bidding_type, "conversions");
+  assert.deepEqual(mockClient.calls.at(-1).body.conversion_event_setting_ids, ["event_setting_1"]);
+
+  const missingEvent = await callTool("create_campaign", {
+    name: "Broken conversion test",
+    budget_usd: 5,
+    bidding_type: "conversions",
+  });
+  assert.equal(missingEvent.error, true);
+  const feedConflict = await callTool("create_campaign", {
+    name: "Broken feed test",
+    budget_usd: 5,
+    mode: "product_feed",
+    bidding_type: "conversions",
+    conversion_event_setting_ids: ["event_setting_1"],
+  });
+  assert.equal(feedConflict.error, true);
 });
 
 test("ad group, ad, state, and upload write payloads match Python", async () => {
@@ -577,6 +763,11 @@ test("ad group, ad, state, and upload write payloads match Python", async () => 
     billing_event: "click",
     max_bid_usd: 1.25,
     context_hints: ["Product: AI visibility"],
+    product_set: {
+      product_feed_id: "product_feed_123",
+      filters: [{ field: "brand", operator: "in", values: ["Trakkr"] }],
+    },
+    idempotency_key: "ad-group-create-1",
   });
   assert.deepEqual(mockClient.calls.at(-1), {
     method: "post",
@@ -587,8 +778,15 @@ test("ad group, ad, state, and upload write payloads match Python", async () => 
       status: "paused",
       bidding_config: { billing_event_type: "click", max_bid_micros: 1_250_000 },
       context_hints: ["Product: AI visibility"],
+      product_set: {
+        product_feed_id: "product_feed_123",
+        filters: [{ field: "brand", operator: "in", values: ["Trakkr"] }],
+      },
     },
+    idempotencyKey: "ad-group-create-1",
   });
+  const activeAdGroupUpdate = await callTool("update_ad_group", { ad_group_id: "ag_1", status: "active" });
+  assert.equal(activeAdGroupUpdate.error, true);
 
   await callTool("create_ad", {
     ad_group_id: "ag_1",
@@ -598,9 +796,13 @@ test("ad group, ad, state, and upload write payloads match Python", async () => 
     body: "See where your brand appears in AI answers.",
     target_url: "https://trakkr.ai",
     file_id: "file_1",
+    idempotency_key: "ad-create-1",
   });
   assert.equal(mockClient.calls.at(-1).body.status, "paused");
   assert.equal(mockClient.calls.at(-1).body.creative.target_url, "https://trakkr.ai");
+  assert.equal(mockClient.calls.at(-1).idempotencyKey, "ad-create-1");
+  const activeAdUpdate = await callTool("update_ad", { ad_id: "ad_1", status: "active" });
+  assert.equal(activeAdUpdate.error, true);
 
   await callTool("set_campaign_state", { campaign_id: "camp_1", state: "pause" });
   assert.equal(mockClient.calls.at(-1).path, "/campaigns/camp_1/pause");
@@ -650,10 +852,56 @@ test("build_campaign orchestrates a paused tree and reports partial failures", a
         file_id: "file_1",
       },
     ],
+    idempotency_key: "tree-1",
   });
   assert.equal(result.created.campaign.id, "camp_1");
   assert.match(result.note, /Created paused/);
   assert.deepEqual(mockClient.calls.map((item) => item.path), ["/campaigns", "/ad_groups", "/ads", "/ads"]);
+  assert.deepEqual(mockClient.calls.map((item) => item.idempotencyKey), ["tree-1:campaign", "tree-1:ad_group", "tree-1:ad_0", "tree-1:ad_1"]);
+
+  mockClient = makeMockClient({
+    postResponses: [
+      { id: "camp_pf", status: "paused" },
+      { id: "ag_pf", status: "paused" },
+      { id: "ad_pf", status: "paused" },
+    ],
+  });
+  setClientFactoryForTests(() => mockClient);
+  await callTool("build_campaign", {
+    name: "Catalog test",
+    budget_usd: 50,
+    ad_group: {
+      name: "Catalog buyers",
+      billing_event: "impression",
+      max_bid_usd: 0.06,
+      product_set: {
+        product_feed_id: "product_feed_123",
+        filters: [{ field: "brand", operator: "in", values: ["Trakkr"] }],
+      },
+    },
+    ads: [{
+      name: "Product template",
+      creative_type: "product_ad_template",
+      title: "{{product.title}}",
+      body: "{{product.body}}",
+      price: "{{product.price}}",
+    }],
+  });
+  assert.equal(mockClient.calls[0].body.mode, "product_feed");
+  assert.equal(mockClient.calls[1].body.product_set.product_feed_id, "product_feed_123");
+
+  mockClient.calls.length = 0;
+  const wrongConversionBilling = await callTool("build_campaign", {
+    name: "Conversion tree",
+    budget_usd: 50,
+    bidding_type: "conversions",
+    conversion_event_setting_id: "event_setting_1",
+    ad_group: { name: "Converters", billing_event: "impression", max_bid_usd: 5 },
+    ads: [{ name: "Card", creative_type: "chat_card", title: "Title", body: "Body", target_url: "https://trakkr.ai", file_id: "file_1" }],
+  });
+  assert.equal(wrongConversionBilling.error, true);
+  assert.match(wrongConversionBilling.message, /billing_event='click'/);
+  assert.equal(mockClient.calls.length, 0);
 
   mockClient = makeMockClient({
     postResponses: [
@@ -712,8 +960,10 @@ test("draft_context_hints is deterministic and bulk_ab_test_hints creates paused
         file_id: "file_1",
       },
     ],
+    idempotency_key: "bulk-1",
   });
   assert.deepEqual(data.ad_ids, ["ad_1", "ad_2"]);
+  assert.deepEqual(mockClient.calls.map((item) => item.idempotencyKey), ["bulk-1:ad_0", "bulk-1:ad_1"]);
   for (const item of mockClient.calls) {
     assert.equal(item.body.status, "paused");
   }
@@ -729,7 +979,7 @@ test("manage_conversions actions and send_conversions validation match Python", 
   await callTool("manage_conversions", {
     action: "set_event_settings",
     name: "Purchase",
-    event_type: "purchase",
+    event_type: "order_created",
     attribution_window_days: 7,
     source_ids: ["src_1"],
   });
@@ -738,7 +988,7 @@ test("manage_conversions actions and send_conversions validation match Python", 
     path: "/conversions/event_settings",
     body: {
       name: "Purchase",
-      event_type: "purchase",
+      event_type: "order_created",
       attribution_window_days: 7,
       source_ids: ["src_1"],
     },
@@ -762,29 +1012,89 @@ test("manage_conversions actions and send_conversions validation match Python", 
   mockClient.calls.length = 0;
   const tooMany = await callTool("send_conversions", {
     pixel_id: "px_1",
-    events: Array.from({ length: 1001 }, (_, index) => ({ id: String(index), type: "purchase" })),
+    events: Array.from({ length: 1001 }, (_, index) => ({ id: String(index), type: "order_created" })),
   });
   assert.equal(tooMany.error, true);
   assert.equal(mockClient.calls.length, 0);
 
   const stale = await callTool("send_conversions", {
     pixel_id: "px_1",
-    events: [{ id: "evt_1", type: "purchase", timestamp_ms: 1000, action_source: "web", source_url: "https://example.com" }],
+    events: [{
+      id: "evt_1",
+      type: "order_created",
+      data: { type: "contents" },
+      timestamp_ms: 1000,
+      action_source: "web",
+      source_url: "https://example.com",
+    }],
   });
   assert.equal(stale.error, true);
   assert.match(stale.message, /older than 7 days/);
 
   const event = {
     id: "evt_1",
-    type: "purchase",
+    type: "order_created",
+    data: { type: "contents" },
     timestamp_ms: Date.now(),
     action_source: "web",
     source_url: "https://example.com",
-    user: { email_sha256: "hash" },
+    user: { email_sha256: "a".repeat(64) },
   };
-  const sent = await callTool("send_conversions", { pixel_id: "px_1", events: [event] });
+  const sent = await callTool("send_conversions", { pixel_id: "px_1", events: [event], validate_only: true });
   assert.equal(sent.ok, true);
-  assert.deepEqual(mockClient.calls.at(-1), { method: "postConversions", pixelId: "px_1", events: [event] });
+  assert.deepEqual(mockClient.calls.at(-1), { method: "postConversions", pixelId: "px_1", events: [event], validateOnly: true });
+
+  const appEvent = {
+    id: "evt_app_1",
+    type: "app_installed",
+    data: { type: "customer_action" },
+    timestamp_ms: Date.now(),
+    action_source: "mobile_app",
+    user: { obref: "opaque-browser-reference" },
+  };
+  const appSent = await callTool("send_conversions", { pixel_id: "px_1", events: [appEvent] });
+  assert.equal(appSent.ok, true);
+  assert.equal(mockClient.calls.at(-1).validateOnly, false);
+  const wrongAppSource = await callTool("send_conversions", {
+    pixel_id: "px_1",
+    events: [{ ...appEvent, action_source: "web", source_url: "https://example.com" }],
+  });
+  assert.equal(wrongAppSource.error, true);
+  assert.match(wrongAppSource.message, /mobile_app/);
+
+  const rawEmail = await callTool("send_conversions", {
+    pixel_id: "px_1",
+    events: [{ ...event, id: "evt_2", user: { email: "buyer@example.com" } }],
+  });
+  assert.equal(rawEmail.error, true);
+  assert.match(rawEmail.message, /raw email/);
+
+  const phoneHash = await callTool("send_conversions", {
+    pixel_id: "px_1",
+    events: [{ ...event, id: "evt_3", user: { phone_number_sha256: "a".repeat(64) } }],
+  });
+  assert.equal(phoneHash.error, true);
+  assert.match(phoneHash.message, /phone/);
+
+  const upperHash = await callTool("send_conversions", {
+    pixel_id: "px_1",
+    events: [{ ...event, id: "evt_4", user: { email_sha256: "A".repeat(64) } }],
+  });
+  assert.equal(upperHash.error, true);
+  assert.match(upperHash.message, /lowercase 64-character/);
+
+  const customMissingName = await callTool("send_conversions", {
+    pixel_id: "px_1",
+    events: [{ ...event, id: "evt_5", type: "custom", data: { type: "custom" } }],
+  });
+  assert.equal(customMissingName.error, true);
+  assert.match(customMissingName.message, /custom_event_name/);
+
+  process.env.OPENAI_ADS_MCP_READONLY = "1";
+  const readonlyWrite = await callTool("manage_conversions", { action: "create_pixel", name: "Blocked pixel" });
+  assert.equal(readonlyWrite.error, true);
+  await callTool("manage_conversions", { action: "get_event_settings" });
+  assert.equal(mockClient.calls.at(-1).path, "/conversions/event_settings");
 });
 
 test("error mapping returns soft failures and raises hard failures", () => {
@@ -810,6 +1120,37 @@ test("client maps 401 to a friendly API key error", async () => {
       error.statusCode === 401 &&
       error.detail === "Invalid or expired OPENAI_ADS_API_KEY.",
   );
+});
+
+test("client sends Idempotency-Key on create requests when provided", async () => {
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "https://ads.test/v1/campaigns");
+    assert.equal(init.headers.get("Idempotency-Key"), "create-1");
+    return new Response(JSON.stringify({ id: "camp_1" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const client = new OpenAIAdsClient("test", "https://ads.test/v1");
+  const result = await client.post("/campaigns", { name: "x" }, { idempotencyKey: "create-1" });
+  assert.equal(result.id, "camp_1");
+});
+
+test("client sends validate_only in conversion ingest requests", async () => {
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "https://bzr.openai.com/v1/events?pid=px_1");
+    assert.deepEqual(JSON.parse(init.body), {
+      validate_only: true,
+      events: [{ id: "evt_1" }],
+    });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const client = new OpenAIAdsClient("test", "https://ads.test/v1");
+  const result = await client.postConversions("px_1", [{ id: "evt_1" }], true);
+  assert.equal(result.ok, true);
 });
 
 test("vendored OpenAPI spec contains every endpoint the tools call", async () => {

@@ -4,6 +4,10 @@ Trakkr tracks the full AI-visibility funnel, organic and paid. This is the open-
 
 `openai-ads-mcp` is a typed Model Context Protocol server for OpenAI Ads, ChatGPT Ads, and OpenAI's Advertiser API. It lets Claude, Cursor, Codex, VS Code, and other MCP clients inspect Ads accounts, read performance insights, build paused campaigns, upload creatives, manage audiences, and send conversion events.
 
+People often search for this as a ChatGPT Ads MCP because the ads appear in ChatGPT. The package keeps the OpenAI Ads MCP name because ChatGPT Ads are managed through OpenAI Ads, Ads Manager, and the OpenAI Advertiser API.
+
+Current public release: `0.1.7`.
+
 It ships in two runtimes with the same tool names, arguments, defaults, safety model, and vendored OpenAPI reference:
 
 | Runtime | Best install | Package path |
@@ -18,6 +22,8 @@ The goal is simple: make OpenAI Ads workable from an AI assistant without making
 Python with `uvx`:
 
 ```bash
+export OPENAI_ADS_API_KEY="..."
+export OPENAI_ADS_MCP_READONLY=1
 uvx openai-ads-mcp
 ```
 
@@ -25,12 +31,16 @@ Python with pip:
 
 ```bash
 python -m pip install openai-ads-mcp
+export OPENAI_ADS_API_KEY="..."
+export OPENAI_ADS_MCP_READONLY=1
 openai-ads-mcp
 ```
 
 Node with `npx`:
 
 ```bash
+export OPENAI_ADS_API_KEY="..."
+export OPENAI_ADS_MCP_READONLY=1
 npx -y openai-ads-mcp
 ```
 
@@ -38,6 +48,8 @@ Node with npm:
 
 ```bash
 npm install -g openai-ads-mcp
+export OPENAI_ADS_API_KEY="..."
+export OPENAI_ADS_MCP_READONLY=1
 openai-ads-mcp
 ```
 
@@ -104,6 +116,7 @@ https://openai-ads-mcp.trakkr.ai/mcp
 ```
 
 That hosted endpoint is for discovery and read-only usage. It does not store or use a Trakkr-owned OpenAI Ads API key.
+The hosted endpoint allows anonymous initialize and `tools/list`; Ads API tool calls require the caller to send `X-OpenAI-Ads-API-Key`.
 
 ## MCP client examples
 
@@ -153,6 +166,16 @@ args = ["openai-ads-mcp"]
 env = { OPENAI_ADS_API_KEY = "your_ads_key_here", OPENAI_ADS_MCP_READONLY = "1" }
 ```
 
+### MCP Registry
+
+Registry-compatible clients should discover this server by name:
+
+```text
+io.github.trakkr-aisearch/openai-ads-mcp
+```
+
+The registry metadata lists npm, PyPI, and the hosted Streamable HTTP endpoint. The hosted endpoint does not require an API key for discovery, but it does require `X-OpenAI-Ads-API-Key` for Ads API tool calls.
+
 ### Docker
 
 The repository includes production Dockerfiles for hosted Streamable HTTP deployments:
@@ -173,13 +196,14 @@ The Node runtime can also serve MCP over Streamable HTTP for hosted or team depl
 
 ```bash
 export OPENAI_ADS_MCP_HTTP_TOKEN="choose_a_long_random_token"
+export OPENAI_ADS_MCP_READONLY=1
 npx -y openai-ads-mcp --http
 ```
 
 Defaults:
 
 - URL: `http://127.0.0.1:8080/mcp` locally, or `https://your-host/mcp` behind a proxy.
-- Health check: `GET /healthz`.
+- Health checks: `GET /healthz`, `GET /health`, and `GET /ready`.
 - Remote mode forces `OPENAI_ADS_MCP_READONLY=1` unless `OPENAI_ADS_MCP_HTTP_ALLOW_WRITES=1` is set.
 - `OPENAI_ADS_MCP_HTTP_TOKEN` protects the MCP endpoint with `Authorization: Bearer <token>`.
 - Clients may send `X-OpenAI-Ads-API-Key` per request, or the server can use a server-side `OPENAI_ADS_API_KEY`.
@@ -195,7 +219,7 @@ Useful hosted env vars:
 | `OPENAI_ADS_MCP_HTTP_ALLOW_WRITES` | Set to `1` only when you want write tools exposed over HTTP. |
 | `OPENAI_ADS_MCP_HTTP_CORS_ORIGIN` | Optional CORS origin. Default `*`. |
 
-For public hosted endpoints, keep writes disabled by default and inject Ads API keys server-side through your own OAuth or credential vault. Do not put a shared Ads API key in browser-visible config.
+For public hosted endpoints, keep writes disabled and require users to bring their own Ads API key per request. Do not put a shared Ads API key in browser-visible config.
 
 ### Public hosted mode
 
@@ -241,12 +265,32 @@ The Python and Node runtimes expose the same 27 tools.
 | --- | --- |
 | `get_account` | Gets the ad account and confirms the API key works. |
 | `get_insights` | Reads account, campaign, ad group, or ad insights with fields, filters, sort, segments, and cursor pagination. |
-| `create_campaign` | Creates a paused campaign with a guarded lifetime budget. |
+| `create_campaign` | Creates a paused campaign with a guarded lifetime budget, including conversion-optimized campaigns with one event setting. |
 | `upload_creative` | Uploads an image URL or local image file and returns `file_id`. |
 | `create_ad` | Creates a paused ad. `chat_card` requires `target_url` and `file_id`. |
 | `build_campaign` | Creates one paused campaign, one paused ad group, and paused ads in a guarded workflow. |
 | `draft_context_hints` | Deterministically drafts API-shaped `context_hints` with no hidden LLM call. |
-| `send_conversions` | Sends conversion events to `https://bzr.openai.com/v1/events?pid=...` after local validation. |
+| `send_conversions` | Sends conversion events to `https://bzr.openai.com/v1/events?pid=...` after local validation, with optional `validate_only`. Supports `obref` and mobile app lifecycle events. |
+
+`get_insights` accepts the current tagged time-range shape, for example:
+
+```json
+{"type":"unix_range","start":1764547200,"end":1765152000}
+```
+
+The older nested shape is normalized for backward compatibility.
+
+For conversion optimization, pass `bidding_type="conversions"` and exactly one
+`conversion_event_setting_ids` value to `create_campaign`. The campaign cannot
+use product-feed mode, and child ad groups must bill by click. `build_campaign`
+offers the same path through its singular `conversion_event_setting_id` helper
+argument. The bid is a CPA input even though OpenAI bills the child ad group per
+click.
+
+OpenAI's Bulk API remains a limited preview and is not exposed as a general MCP
+tool. Product-feed campaign objects are supported, but feed connection and
+catalog upload still happen in Ads Manager or through OpenAI's supported SFTP
+flow.
 
 ## Safety Model
 
@@ -258,7 +302,8 @@ This server can affect real ad spend, so the defaults are deliberately cautious.
 4. To exceed the ceiling, pass `confirm_budget=True`.
 5. `OPENAI_ADS_MCP_READONLY=1` hides every write tool entirely.
 6. Conversion ingest validates at most 1000 events per call, timestamps no older than 7 days, and timestamps no more than 10 minutes in the future.
-7. The server never logs API keys or conversion user data.
+7. Use `validate_only=true` to validate a conversion batch without ingesting it.
+8. The server never logs API keys or conversion user data.
 
 MCP annotations are set on every tool. Read tools use `readOnlyHint`. Write tools use `readOnlyHint=false`. Activation and budget-changing tools are marked destructive and open-world so hosts can prompt before running them.
 
@@ -341,11 +386,18 @@ OpenAPI drift check:
 ```bash
 cd services/openai-ads-mcp/typescript
 npm run check:openapi
+npm run check:docs
 ```
+
+The scheduled workflow runs both checks weekly. The OpenAPI comparison catches
+schema drift. The guide check covers current behavior documented outside the
+downloadable schema, including tagged insight ranges, `obref`, mobile app
+events, conversion optimization, advertiser readiness, required chat-card
+images, and the limited-preview Bulk API.
 
 ## Release Status
 
-This package is beta. Before the first public release, confirm that the PyPI and npm package names `openai-ads-mcp` are available. See `RELEASING.md`.
+`0.1.7` is the current public beta release for npm, PyPI, the hosted endpoint, and the live MCP Registry entry. Registry metadata versions are immutable, so registry-only corrections in this repo should ship with the next package release version. Release work is synced to the dedicated public repository before publishing. See `RELEASING.md`.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "openai-ads-mcp",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "mcpName": "io.github.trakkr-aisearch/openai-ads-mcp",
   "description": "Typed MCP server for OpenAI Ads and ChatGPT Ads via the Advertiser API",
   "type": "module",
@@ -41,7 +41,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
@@ -49,9 +50,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start:http": "node dist/index.js --http",
+    "pretest": "npm run build",
     "test": "node --test test/*.test.mjs",
     "check:openapi": "node scripts/check-openapi-drift.mjs",
-    "prepack": "npm run build"
+    "check:docs": "node scripts/check-docs-contract.mjs",
+    "prepack": "npm run build && cp ../LICENSE LICENSE",
+    "postpack": "rm -f LICENSE"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

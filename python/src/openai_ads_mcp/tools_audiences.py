@@ -5,7 +5,7 @@ from __future__ import annotations
 from ._core import *
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def list_audiences(
     limit: int = 20,
     after: str | None = None,
@@ -25,7 +25,7 @@ async def list_audiences(
         return _err(e)
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def get_audience(audience_id: str) -> str:
     """Get one custom audience by id."""
     if audience_err := _validate_non_empty("audience_id", audience_id):
@@ -39,7 +39,7 @@ async def get_audience(audience_id: str) -> str:
         return _err(e)
 
 
-@ads_tool()
+@ads_tool(open_world=True)
 async def search_geo(query: str) -> str:
     """Search geo targets for targeting.locations.include.
 
@@ -77,7 +77,7 @@ def _members_payload(members: Any) -> tuple[list[dict[str, Any]] | None, str | N
     return out, None
 
 
-@ads_tool(writes=True, destructive=True)
+@ads_tool(writes=True, destructive=True, open_world=True)
 async def manage_audience(
     action: Literal["create", "upload", "archive"],
     name: str | None = None,

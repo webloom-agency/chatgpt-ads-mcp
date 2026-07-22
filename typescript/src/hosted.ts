@@ -75,6 +75,18 @@ export function isHostedDisabled(): boolean {
   return truthy(process.env.OPENAI_ADS_MCP_HOSTED_DISABLED);
 }
 
+export function isHttpWriteModeAllowed(): boolean {
+  return truthy(process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES);
+}
+
+export function isHttpBaseUrlOverrideAllowed(): boolean {
+  return truthy(process.env.OPENAI_ADS_MCP_HTTP_ALLOW_BASE_URL_OVERRIDE);
+}
+
+export function isHttpFilePathUploadAllowed(): boolean {
+  return truthy(process.env.OPENAI_ADS_MCP_HTTP_ALLOW_FILE_PATH_UPLOADS);
+}
+
 export function hostedBodyMaxBytes(): number {
   return positiveInt(process.env.OPENAI_ADS_MCP_HTTP_BODY_MAX_BYTES, 256 * 1024);
 }
@@ -98,15 +110,19 @@ export function upstreamResponseMaxBytes(): number | undefined {
 }
 
 export function configureHostedEnvironment(): void {
+  const allowWrites = isHttpWriteModeAllowed();
   if (!isHostedPublicMode()) {
-    if (!truthy(process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES)) {
+    if (allowWrites && !(process.env.OPENAI_ADS_MCP_HTTP_TOKEN ?? "").trim()) {
+      throw new Error("OPENAI_ADS_MCP_HTTP_TOKEN is required when OPENAI_ADS_MCP_HTTP_ALLOW_WRITES=1.");
+    }
+    if (!allowWrites) {
       process.env.OPENAI_ADS_MCP_READONLY = "1";
     }
     return;
   }
 
   process.env.OPENAI_ADS_MCP_READONLY = "1";
-  if (truthy(process.env.OPENAI_ADS_MCP_HTTP_ALLOW_WRITES)) {
+  if (allowWrites) {
     throw new Error("OPENAI_ADS_MCP_HTTP_ALLOW_WRITES cannot be enabled with OPENAI_ADS_MCP_HOSTED_PUBLIC=1.");
   }
   if ((process.env.OPENAI_ADS_API_KEY ?? "").trim()) {
