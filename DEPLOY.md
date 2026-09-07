@@ -1,6 +1,6 @@
 # Deploy ChatGPT / OpenAI Ads MCP (Render + any client)
 
-OpenAI Ads has **no OAuth** yet. Remote clients always use:
+OpenAI Ads has **no OAuth**. Remote clients use:
 
 ```json
 {
@@ -11,22 +11,18 @@ OpenAI Ads has **no OAuth** yet. Remote clients always use:
 }
 ```
 
-Two secrets:
-
-| Secret | Where it lives | Who sends it |
+| Secret | Lives on | Sent by client? |
 | --- | --- | --- |
-| `OPENAI_ADS_API_KEY` | Render env only | Nobody — server calls Ads API |
-| `MCP_BEARER_TOKEN` | Render env + your client headers | Your MCP client |
+| `OPENAI_ADS_API_KEY` | Render env | No |
+| `MCP_BEARER_TOKEN` | Render env + client header | Yes (`Authorization: Bearer …`) |
 
 ---
 
-## 1. Get an OpenAI Ads API key
+## 1. Ads API key
 
-1. Open [ads.openai.com](https://ads.openai.com) with an approved advertiser account.
-2. Go to **Settings → API keys** (not the campaign list, and not platform.openai.com model keys).
-3. Create a key, copy it once.
-
-Quick check:
+1. [ads.openai.com](https://ads.openai.com) → **Settings → API keys**
+2. Create a key (not a platform.openai.com model key)
+3. Optional check:
 
 ```bash
 curl -sS -H "Authorization: Bearer $OPENAI_ADS_API_KEY" \
@@ -35,54 +31,71 @@ curl -sS -H "Authorization: Bearer $OPENAI_ADS_API_KEY" \
 
 ---
 
-## 2. Deploy on Render
+## 2. Push this repo to GitHub
 
-### Option A — Blueprint (`render.yaml`)
-
-1. Push this repo to GitHub (or connect your fork).
-2. In Render: **New → Blueprint** → select the repo.
-3. Render reads `render.yaml` and creates a Python web service with `rootDir: python`.
-4. Set **`OPENAI_ADS_API_KEY`** in the dashboard (secret).
-5. Copy the generated **`MCP_BEARER_TOKEN`** (or set your own long random string).
-6. Deploy. Health check is `GET /healthz` (no auth).
-
-### Option B — Manual web service
-
-1. **New → Web Service** → connect the repo.
-2. Settings:
-   - **Root Directory:** `python`
-   - **Runtime:** Python
-   - **Build Command:** `pip install -e .`
-   - **Start Command:** `python -m openai_ads_mcp`
-   - **Health Check Path:** `/healthz`
-3. Environment variables:
-
-| Key | Value |
-| --- | --- |
-| `MCP_TRANSPORT` | `http` |
-| `MCP_STATELESS_HTTP` | `true` |
-| `OPENAI_ADS_MCP_READONLY` | `1` (default anyway — keeps write tools hidden) |
-| `OPENAI_ADS_API_KEY` | your Ads API key |
-| `MCP_BEARER_TOKEN` | long random secret — `openssl rand -hex 32` (Render Blueprint can auto-generate) |
-
-> **Read-only by default.** Write tools (`create_campaign`, `update_campaign`, `set_campaign_state`, …) are not registered. When you want MCP to edit campaigns later, add `OPENAI_ADS_MCP_ALLOW_WRITES=1` on Render and **redeploy** (restart required so tools re-register).
-
-4. Deploy. Endpoint: `https://<service-name>.onrender.com/mcp`
-
-Verify:
-
-```bash
-curl -sS https://YOUR-SERVICE.onrender.com/
-curl -sS https://YOUR-SERVICE.onrender.com/healthz
-# should be 401 without token:
-curl -sS -o /dev/null -w "%{http_code}\n" https://YOUR-SERVICE.onrender.com/mcp
-```
+Commit and push `main` (including the root `Dockerfile`).
 
 ---
 
-## 3. Connect any custom MCP client
+## 3. Create the Render web service
 
-Use Streamable HTTP at **`/mcp`** plus bearer auth.
+**New → Web Service** → connect `chatgpt-ads-mcp`.
+
+Fill the form like this (matches the Render UI):
+
+| Field | Value |
+| --- | --- |
+| **Name** | `chatgpt-ads-mcp` |
+| **Language** | **Docker** |
+| **Branch** | `main` |
+| **Region** | wherever you want (e.g. Frankfurt) |
+| **Root Directory** | **leave empty** |
+| **Dockerfile Path** | `./Dockerfile` (default) |
+| **Instance** | Starter ($7) or free if you accept cold starts |
+
+> Do **not** set Root Directory to `python`. The Docker build already copies `python/` from the repo root. An empty Root Directory is correct.
+
+Then open **Environment** and add:
+
+| Key | Value |
+| --- | --- |
+| `OPENAI_ADS_API_KEY` | your Ads API key (secret) |
+| `MCP_BEARER_TOKEN` | run locally: `openssl rand -hex 32` — paste the result (secret) |
+| `MCP_TRANSPORT` | `http` |
+| `MCP_STATELESS_HTTP` | `true` |
+| `OPENAI_ADS_MCP_READONLY` | `1` |
+| `HOST` | `0.0.0.0` |
+
+Optional: set **Health Check Path** to `/healthz`.
+
+Click **Deploy web service**.
+
+### Or use Blueprint
+
+**New → Blueprint** → this repo. `render.yaml` creates the same Docker service. Then set `OPENAI_ADS_API_KEY` and copy the generated `MCP_BEARER_TOKEN`.
+
+---
+
+## 4. Verify
+
+After deploy, URL looks like `https://chatgpt-ads-mcp-xxxx.onrender.com`.
+
+```bash
+curl -sS https://YOUR-SERVICE.onrender.com/healthz
+# → ok
+
+curl -sS https://YOUR-SERVICE.onrender.com/
+# → {"name":"openai-ads-mcp","readonly":true,"auth":"bearer",...}
+
+curl -sS -o /dev/null -w "%{http_code}\n" https://YOUR-SERVICE.onrender.com/mcp
+# → 401  (expected without bearer)
+```
+
+MCP endpoint: **`https://YOUR-SERVICE.onrender.com/mcp`**
+
+---
+
+## 5. Custom MCP client config
 
 ```json
 {
@@ -93,11 +106,11 @@ Use Streamable HTTP at **`/mcp`** plus bearer auth.
 }
 ```
 
-Do **not** put `OPENAI_ADS_API_KEY` in client headers. The server already has it.
+Use the same `MCP_BEARER_TOKEN` you set on Render. Never put `OPENAI_ADS_API_KEY` in client headers.
 
-### Cursor (remote)
+### Cursor example
 
-In `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
+`~/.cursor/mcp.json`:
 
 ```json
 {
@@ -112,56 +125,34 @@ In `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
 }
 ```
 
-### ChatGPT custom connector / Developer mode
-
-- Server URL: `https://YOUR-SERVICE.onrender.com/mcp`
-- Auth: header `Authorization` = `Bearer YOUR_MCP_BEARER_TOKEN`
-
-### Generic / SDK / n8n / in-house
-
-Same shape: `url` + `headers.Authorization`. Prefer Streamable HTTP (`/mcp`). Only use `/sse` if a legacy client forces SSE (`MCP_TRANSPORT=sse`).
-
 ---
 
-## 4. First prompts (stats)
+## 6. First prompts
 
-With read-only (default):
-
-1. Call `get_account`
-2. Call `list_campaigns`
-3. Call `get_insights` for the last 7 days with impressions, clicks, spend, ctr, cpc, cpm
+1. `get_account`
+2. `list_campaigns`
+3. `get_insights` (impressions, clicks, spend, ctr, cpc, cpm)
 
 ### Enable campaign editing later
 
-Write tools already exist in the codebase (`create_campaign`, `update_campaign`, `set_campaign_state`, `build_campaign`, …). They stay hidden until you opt in:
-
-1. In Render → Environment, set **`OPENAI_ADS_MCP_ALLOW_WRITES=1`**
-   (or set `OPENAI_ADS_MCP_READONLY=0`).
-2. Optionally raise `OPENAI_ADS_BUDGET_CEILING_USD` (default `100`).
-3. **Redeploy / restart** the service (tool list is fixed at process start).
-4. Confirm `create_campaign` appears in `tools/list`, then edit only with paused defaults first.
-
-Until then, leave writes off.
+1. Render → Environment → `OPENAI_ADS_MCP_ALLOW_WRITES=1`
+2. Redeploy
+3. Confirm write tools appear in `tools/list`
 
 ---
 
-## 5. Troubleshooting
+## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `401` on `/mcp` | Wrong/missing `Authorization: Bearer …` (must match `MCP_BEARER_TOKEN`) |
-| `421` / Invalid Host | Leave `MCP_ALLOWED_HOSTS` empty (default). Bearer already protects the endpoint. |
-| Init handshake stalls / proxy buffering | Keep `MCP_TRANSPORT=http` and `MCP_STATELESS_HTTP=true` (do not use SSE on Render) |
-| Free Render sleeps | First request after idle can take ~30s; use a paid instance for always-on |
-| Ads API 401 | Bad `OPENAI_ADS_API_KEY` — recreate under Ads Manager → Settings → API keys |
+| Build uses Node / wrong image | You need the **Python** root `Dockerfile`. Push latest `main`. Old Node image is now `Dockerfile.node`. |
+| Root Directory = `python` | Clear it. Empty is correct for Docker. |
+| `401` on `/mcp` | Bearer must match `MCP_BEARER_TOKEN` exactly |
+| Free tier sleep | First request after idle ~30s; Starter stays warmer |
+| Ads API 401 | Bad `OPENAI_ADS_API_KEY` |
 
 ---
 
 ## Why not OAuth?
 
-OpenAI Ads / ChatGPT Ads expose an **API key** today, not an OAuth authorization server for advertisers. So:
-
-- **MCP transport** → shared bearer (`MCP_BEARER_TOKEN`) — required for every remote client
-- **Ads API** → server-side key (`OPENAI_ADS_API_KEY`) — never sent by the client
-
-When/if OpenAI ships Ads OAuth, this repo can grow a google-ads-style optional OAuth 2.1 layer; until then, URL + Bearer is the correct contract.
+OpenAI Ads only offers API keys today. Transport auth = shared bearer. Product auth = server-side Ads key.

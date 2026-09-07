@@ -1,11 +1,11 @@
 services:
   - type: web
     name: chatgpt-ads-mcp
-    runtime: python
+    runtime: docker
     plan: starter
-    rootDir: python
-    buildCommand: pip install -e .
-    startCommand: python -m openai_ads_mcp
+    # Repo-root Dockerfile (Python MCP). Leave Root Directory empty in the UI.
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /healthz
     envVars:
       - key: MCP_TRANSPORT

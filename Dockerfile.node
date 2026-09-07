@@ -1,5 +1,5 @@
 # Hosted ChatGPT / OpenAI Ads MCP (Python, Streamable HTTP)
-# Render: Language = Docker, Root Directory = (leave empty)
+# For Render / any PaaS: Language = Docker, Root Directory = (empty)
 
 FROM python:3.12-slim
 
@@ -11,18 +11,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
     PORT=8000
 
-WORKDIR /build
-
-# Keep python/ + LICENSE side-by-side so hatch's ../LICENSE include resolves.
-COPY LICENSE ./LICENSE
-COPY python ./python
-
-WORKDIR /build/python
-RUN pip install --no-cache-dir . \
-    && rm -rf /root/.cache/pip
-
 WORKDIR /app
-ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages
+
+COPY python/pyproject.toml python/README.md ./
+COPY python/src ./src
+COPY LICENSE ./LICENSE
+
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 CMD ["python", "-m", "openai_ads_mcp"]

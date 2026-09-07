@@ -184,17 +184,15 @@ The registry metadata lists npm, PyPI, and the hosted Streamable HTTP endpoint. 
 
 ### Docker
 
-The repository includes production Dockerfiles for hosted Streamable HTTP deployments:
-
 ```bash
-docker build -t openai-ads-mcp .
-docker run --rm -p 8080:8080 \
-  -e OPENAI_ADS_MCP_HOSTED_PUBLIC=1 \
-  -e OPENAI_ADS_MCP_TELEMETRY_SALT="local-test-salt" \
-  openai-ads-mcp
+docker build -t chatgpt-ads-mcp .
+docker run --rm -p 8000:8000 \
+  -e OPENAI_ADS_API_KEY=... \
+  -e MCP_BEARER_TOKEN="$(openssl rand -hex 32)" \
+  chatgpt-ads-mcp
 ```
 
-The narrower `typescript/Dockerfile` is used by the Cloud Run deploy script. For local stdio use, prefer `uvx openai-ads-mcp` or `npx -y openai-ads-mcp`.
+The root `Dockerfile` is the **Python** hosted MCP (Render / custom clients). The previous Node public image is `Dockerfile.node`. Cloud Run still uses `typescript/Dockerfile`.
 
 ## Custom MCP client (recommended for this fork)
 
@@ -211,14 +209,14 @@ OpenAI Ads has **no OAuth**. Remote clients use URL + bearer:
 }
 ```
 
-Quick path:
+Quick path on Render:
 
-1. Create an Ads API key at [ads.openai.com/settings](https://ads.openai.com/settings).
-2. Deploy with `render.yaml` (or manual Render web service, root dir `python`).
-3. Set `OPENAI_ADS_API_KEY` + `MCP_BEARER_TOKEN` on Render (`MCP_TRANSPORT=http`).
-4. Point any MCP client at `https://<service>.onrender.com/mcp` with the bearer header.
+1. Ads API key from [ads.openai.com/settings](https://ads.openai.com/settings)
+2. **New → Web Service** → Language **Docker**, **Root Directory empty**, branch `main`
+3. Env: `OPENAI_ADS_API_KEY`, `MCP_BEARER_TOKEN` (`openssl rand -hex 32`), `MCP_TRANSPORT=http`, `OPENAI_ADS_MCP_READONLY=1`
+4. Client URL: `https://<service>.onrender.com/mcp` + bearer header
 
-Stats workflow: `get_account` → `list_campaigns` → `get_insights`.
+Stats: `get_account` → `list_campaigns` → `get_insights`.
 
 ## Streamable HTTP (Node / Trakkr-style BYOK)
 
