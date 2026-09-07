@@ -1,31 +1,17 @@
-# openai-ads-mcp
+# openai-ads-mcp (Python package)
 
 <!-- mcp-name: io.github.trakkr-aisearch/openai-ads-mcp -->
 
-Python runtime for `openai-ads-mcp`, a typed MCP server for OpenAI Ads, ChatGPT Ads MCP workflows, and OpenAI's Advertiser API.
+Python package for the ChatGPT / OpenAI Ads MCP server.
 
-## Quick start (local / stdio)
+**User docs (install, Claude, ChatGPT, Render):** see the repo root  
+→ [README.md](../README.md) (EN) · [README.fr.md](../README.fr.md) · [DEPLOY.md](../DEPLOY.md)
 
-```bash
-export OPENAI_ADS_API_KEY="..."
-export OPENAI_ADS_MCP_READONLY=1
-uvx openai-ads-mcp
-```
-
-Readonly mode is recommended for first connection because it hides all write tools from `tools/list`.
-
-## Hosted / custom MCP client (Streamable HTTP)
-
-See root [`DEPLOY.md`](../DEPLOY.md). On Render: **Language = Docker**, **Root Directory empty** (do not set `python`).
-
-
-## Local development
+## Dev
 
 ```bash
 cd python
-python -m pip install -e .
-python -m pytest -q
-python -c "import openai_ads_mcp; print('ok')"
+pip install -e .
+pytest -q
+python -m openai_ads_mcp
 ```
-
-The full README and release notes live one directory up in the service root.

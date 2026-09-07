@@ -1,6 +1,9 @@
 # openai-ads-mcp for Node
 
-Node runtime for `openai-ads-mcp`, a typed MCP server for OpenAI Ads, ChatGPT Ads MCP workflows, and OpenAI's Advertiser API.
+Node runtime for `openai-ads-mcp`.
+
+**User docs (Claude, ChatGPT, Render, any client):**  
+→ [README.md](../README.md) (EN) · [README.fr.md](../README.fr.md)
 
 It exposes the same tools, arguments, defaults, readonly mode, and budget guard as the Python package.
 

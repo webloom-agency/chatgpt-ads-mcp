@@ -1,5 +1,7 @@
 # Deploy ChatGPT / OpenAI Ads MCP (Render + any client)
 
+*Full product docs: [README.md](./README.md) (EN) · [README.fr.md](./README.fr.md)*
+
 OpenAI Ads has **no OAuth**. Remote clients use:
 
 ```json
