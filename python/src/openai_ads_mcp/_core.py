@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 from .client import API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient
@@ -24,8 +25,36 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return _truthy(raw)
+
+
+def _falsey(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"0", "false", "no", "off"}
+
+
 def is_readonly_mode() -> bool:
-    return _truthy(os.environ.get("OPENAI_ADS_MCP_READONLY"))
+    """Hide write/spend tools unless explicitly opted in.
+
+    Default is read-only (safe for Render / custom clients). To enable campaign
+    create/update/activate later, set either:
+      OPENAI_ADS_MCP_ALLOW_WRITES=1
+    or:
+      OPENAI_ADS_MCP_READONLY=0
+    then restart the server. If both are set, READONLY=1 wins.
+    """
+    raw = os.environ.get("OPENAI_ADS_MCP_READONLY")
+    if raw is not None and raw.strip() != "":
+        if _falsey(raw):
+            return False
+        if _truthy(raw):
+            return True
+    if _truthy(os.environ.get("OPENAI_ADS_MCP_ALLOW_WRITES")):
+        return False
+    return True
 
 
 def _budget_ceiling_usd() -> float:
@@ -45,7 +74,8 @@ async def _lifespan(server):
     if not api_key:
         raise RuntimeError(
             "OPENAI_ADS_API_KEY environment variable is required. "
-            "Create an Ads API key in OpenAI Ads Manager, then restart the MCP server."
+            "Create an Ads API key in OpenAI Ads Manager → Settings → API keys, "
+            "then restart the MCP server."
         )
     base_url = os.environ.get("OPENAI_ADS_API_BASE_URL", API_BASE_URL)
     try:
@@ -60,6 +90,31 @@ async def _lifespan(server):
         _client = None
 
 
+# Behind a PaaS/proxy the public Host header is not localhost, which trips
+# FastMCP DNS-rebinding protection (HTTP 421). Hosted mode is already guarded
+# by MCP_BEARER_TOKEN, so host checking is off unless an allowlist is set.
+_allowed_hosts = [
+    h.strip() for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()
+]
+_allowed_origins = [
+    o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+if _allowed_hosts or _allowed_origins:
+    _transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed_hosts or ["*"],
+        allowed_origins=_allowed_origins or ["*"],
+    )
+else:
+    _transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+
+# Stateless Streamable HTTP is the robust default behind Render/Railway/Fly.
+STATELESS_HTTP = _env_bool("MCP_STATELESS_HTTP", True)
+JSON_RESPONSE = _env_bool("MCP_JSON_RESPONSE", False)
+MCP_HTTP_PATH = os.getenv("MCP_HTTP_PATH", "/mcp").strip() or "/mcp"
+
 mcp = FastMCP(
     "OpenAI Ads",
     instructions=(
@@ -71,12 +126,23 @@ mcp = FastMCP(
         "Safety model:\n"
         "  1. Create tools default to paused. build_campaign creates every object paused.\n"
         "  2. Budget-setting tools enforce OPENAI_ADS_BUDGET_CEILING_USD, default 100 USD, unless confirm_budget=True.\n"
-        "  3. Set OPENAI_ADS_MCP_READONLY=1 for first connection. In readonly mode write actions are hidden, while conversion read actions remain available.\n"
+        "  3. Read-only by default: write tools are hidden. To edit campaigns later, "
+        "set OPENAI_ADS_MCP_ALLOW_WRITES=1 (or OPENAI_ADS_MCP_READONLY=0) and restart. "
+        "In readonly mode conversion read actions remain available.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
-        "Paid presence is half the picture. Track how your brand shows up organically across ChatGPT, Perplexity, Gemini and Claude at trakkr.ai."
+        "Stats workflow: get_account → list_campaigns → get_insights "
+        "(impressions, clicks, spend, ctr, cpc, cpm)."
     ),
     lifespan=_lifespan,
+    transport_security=_transport_security,
+    stateless_http=STATELESS_HTTP,
+    json_response=JSON_RESPONSE,
 )
+
+try:
+    mcp.settings.streamable_http_path = MCP_HTTP_PATH  # type: ignore[attr-defined]
+except Exception:
+    pass
 
 
 @mcp.resource(
@@ -508,6 +574,9 @@ __all__ = (
     "_client",
     "_lifespan",
     "mcp",
+    "MCP_HTTP_PATH",
+    "STATELESS_HTTP",
+    "JSON_RESPONSE",
     "trakkr_visibility_resource",
     "_COMPACT_SEPARATORS",
     "_compact",
@@ -523,6 +592,8 @@ __all__ = (
     "ads_tool",
     "readonly_actions",
     "is_readonly_mode",
+    "_truthy",
+    "_env_bool",
     "_get_client_or_error",
     "_validate_int_range",
     "_validate_float_range",

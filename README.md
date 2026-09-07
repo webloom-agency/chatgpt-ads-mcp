@@ -53,10 +53,10 @@ export OPENAI_ADS_MCP_READONLY=1
 openai-ads-mcp
 ```
 
-For local development from this monorepo:
+For local development from this repo:
 
 ```bash
-cd services/openai-ads-mcp/python
+cd python
 python -m pip install -e .
 python -m openai_ads_mcp
 
@@ -88,7 +88,7 @@ export OPENAI_ADS_MCP_READONLY=1
 npx -y openai-ads-mcp
 ```
 
-Readonly mode hides every write tool. They are absent from `tools/list` and cannot be called. Once you have confirmed the account and inspected data, unset `OPENAI_ADS_MCP_READONLY` to enable writes.
+Readonly mode hides every write tool. They are absent from `tools/list` and cannot be called. **Read-only is the default** (even if `OPENAI_ADS_MCP_READONLY` is unset). To enable campaign editing later, set `OPENAI_ADS_MCP_ALLOW_WRITES=1` (or `OPENAI_ADS_MCP_READONLY=0`) and restart.
 
 Optional environment variables:
 
@@ -96,8 +96,14 @@ Optional environment variables:
 | --- | --- |
 | `OPENAI_ADS_API_KEY` | Required bearer key for `https://api.ads.openai.com/v1`. |
 | `OPENAI_ADS_API_BASE_URL` | Optional HTTPS override for tests or proxies. |
-| `OPENAI_ADS_MCP_READONLY` | Set to `1` or `true` to register read tools only. |
+| `OPENAI_ADS_MCP_READONLY` | Read-only when `1`/`true` (also the default if unset). Set `0` to allow writes. |
+| `OPENAI_ADS_MCP_ALLOW_WRITES` | Set to `1` to register campaign create/update/activate tools (future editing). |
 | `OPENAI_ADS_BUDGET_CEILING_USD` | Optional budget guard. Default `100`. |
+| `MCP_TRANSPORT` | Python: `stdio` (default), `http`, or `sse`. |
+| `MCP_BEARER_TOKEN` | Python hosted mode: protects `/mcp`. Alias: `OPENAI_ADS_MCP_HTTP_TOKEN`. |
+| `MCP_STATELESS_HTTP` | Python Streamable HTTP: default `true` (best behind proxies). |
+| `MCP_HTTP_PATH` | Python MCP path. Default `/mcp`. |
+| `PORT` / `HOST` | Python hosted bind address. Default `8000` / `0.0.0.0`. |
 
 ## Discovery Metadata
 
@@ -190,9 +196,33 @@ docker run --rm -p 8080:8080 \
 
 The narrower `typescript/Dockerfile` is used by the Cloud Run deploy script. For local stdio use, prefer `uvx openai-ads-mcp` or `npx -y openai-ads-mcp`.
 
-## Streamable HTTP
+## Custom MCP client (recommended for this fork)
 
-The Node runtime can also serve MCP over Streamable HTTP for hosted or team deployments:
+**Full guide:** [DEPLOY.md](./DEPLOY.md)
+
+OpenAI Ads has **no OAuth**. Remote clients use URL + bearer:
+
+```json
+{
+  "url": "https://YOUR-SERVICE.onrender.com/mcp",
+  "headers": {
+    "Authorization": "Bearer YOUR_MCP_BEARER_TOKEN"
+  }
+}
+```
+
+Quick path:
+
+1. Create an Ads API key at [ads.openai.com/settings](https://ads.openai.com/settings).
+2. Deploy with `render.yaml` (or manual Render web service, root dir `python`).
+3. Set `OPENAI_ADS_API_KEY` + `MCP_BEARER_TOKEN` on Render (`MCP_TRANSPORT=http`).
+4. Point any MCP client at `https://<service>.onrender.com/mcp` with the bearer header.
+
+Stats workflow: `get_account` → `list_campaigns` → `get_insights`.
+
+## Streamable HTTP (Node / Trakkr-style BYOK)
+
+The Node runtime can also serve MCP over Streamable HTTP for hosted or team deployments (including per-request `X-OpenAI-Ads-API-Key`):
 
 ```bash
 export OPENAI_ADS_MCP_HTTP_TOKEN="choose_a_long_random_token"

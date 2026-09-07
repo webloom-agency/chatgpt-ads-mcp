@@ -77,7 +77,10 @@ async def manage_conversions(
       time_ranges, and entity_ids.
     """
     if is_readonly_mode() and action not in _CONVERSION_READ_ACTIONS:
-        return _bad_request("OPENAI_ADS_MCP_READONLY=1 permits only get_event_settings and get_insights for manage_conversions.")
+        return _bad_request(
+            "Read-only mode permits only get_event_settings and get_insights for "
+            "manage_conversions. Set OPENAI_ADS_MCP_ALLOW_WRITES=1 to enable writes."
+        )
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err

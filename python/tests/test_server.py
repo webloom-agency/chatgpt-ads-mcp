@@ -13,6 +13,8 @@ import httpx
 import pytest
 
 os.environ.setdefault("OPENAI_ADS_API_KEY", "test_ads_key")
+# Full tool suite (including writes) for unit tests. Production defaults to read-only.
+os.environ["OPENAI_ADS_MCP_ALLOW_WRITES"] = "1"
 os.environ.pop("OPENAI_ADS_MCP_READONLY", None)
 
 import openai_ads_mcp  # noqa: E402
@@ -178,6 +180,7 @@ class TestToolRegistration:
             "print(json.dumps(sorted(openai_ads_mcp.mcp._tool_manager._tools)))"
         )
         env = os.environ.copy()
+        env.pop("OPENAI_ADS_MCP_ALLOW_WRITES", None)
         env["OPENAI_ADS_MCP_READONLY"] = "1"
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
         proc = subprocess.run(
@@ -196,6 +199,30 @@ class TestToolRegistration:
         assert "send_conversions" not in names
         assert "manage_conversions" in names
         assert not (names & (EXPECTED_WRITE_TOOLS - EXPECTED_READONLY_WRITE_TOOLS))
+
+    @pytest.mark.asyncio
+    async def test_default_is_readonly_without_allow_writes(self):
+        code = (
+            "import json, openai_ads_mcp; "
+            "print(json.dumps(sorted(openai_ads_mcp.mcp._tool_manager._tools)))"
+        )
+        env = os.environ.copy()
+        env.pop("OPENAI_ADS_MCP_ALLOW_WRITES", None)
+        env.pop("OPENAI_ADS_MCP_READONLY", None)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        names = set(json.loads(proc.stdout))
+        assert "get_insights" in names
+        assert "create_campaign" not in names
+        assert "update_campaign" not in names
+        assert "set_campaign_state" not in names
 
 
 class TestReadTools:
@@ -889,3 +916,51 @@ class TestOpenAPIDrift:
         paths = set(json.loads(spec_path.read_text())["paths"])
         missing = USED_OPENAI_ADS_PATHS - paths
         assert not missing, f"Paths missing from vendored OpenAPI spec: {sorted(missing)}"
+
+
+class TestHostedTransport:
+    def test_bearer_token_prefers_mcp_bearer_token(self, monkeypatch):
+        from openai_ads_mcp.hosted import mcp_bearer_token
+
+        monkeypatch.setenv("MCP_BEARER_TOKEN", "primary-token-value-xxxxxxxxxx")
+        monkeypatch.setenv("OPENAI_ADS_MCP_HTTP_TOKEN", "alias-token-value-xxxxxxxxxxx")
+        assert mcp_bearer_token() == "primary-token-value-xxxxxxxxxx"
+
+    def test_bearer_token_falls_back_to_http_token(self, monkeypatch):
+        from openai_ads_mcp.hosted import mcp_bearer_token
+
+        monkeypatch.delenv("MCP_BEARER_TOKEN", raising=False)
+        monkeypatch.setenv("OPENAI_ADS_MCP_HTTP_TOKEN", "alias-token-value-xxxxxxxxxxx")
+        assert mcp_bearer_token() == "alias-token-value-xxxxxxxxxxx"
+
+    def test_build_hosted_app_requires_bearer(self, monkeypatch):
+        from openai_ads_mcp.hosted import build_hosted_app
+
+        monkeypatch.delenv("MCP_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("OPENAI_ADS_MCP_HTTP_TOKEN", raising=False)
+        with pytest.raises(ValueError, match="MCP_BEARER_TOKEN"):
+            build_hosted_app("http")
+
+    def test_rejects_placeholder_bearer_token(self, monkeypatch):
+        from openai_ads_mcp.hosted import build_hosted_app
+
+        monkeypatch.setenv("MCP_BEARER_TOKEN", "change_me_to_a_long_random_string")
+        with pytest.raises(ValueError, match="placeholder"):
+            build_hosted_app("http")
+
+    def test_rejects_short_bearer_token(self, monkeypatch):
+        from openai_ads_mcp.hosted import build_hosted_app
+
+        monkeypatch.setenv("MCP_BEARER_TOKEN", "too-short")
+        with pytest.raises(ValueError, match="at least"):
+            build_hosted_app("http")
+
+    def test_build_hosted_app_http(self, monkeypatch):
+        from openai_ads_mcp.hosted import build_hosted_app
+
+        monkeypatch.setenv("MCP_BEARER_TOKEN", "unit-test-bearer-token-ok-xxxx")
+        app = build_hosted_app("http")
+        assert app is not None
+        paths = {getattr(route, "path", None) for route in app.router.routes}
+        assert "/healthz" in paths
+        assert "/" in paths

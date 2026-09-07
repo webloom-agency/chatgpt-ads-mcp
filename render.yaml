@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: chatgpt-ads-mcp
+    runtime: python
+    plan: starter
+    rootDir: python
+    buildCommand: pip install -e .
+    startCommand: python -m openai_ads_mcp
+    healthCheckPath: /healthz
+    envVars:
+      - key: MCP_TRANSPORT
+        value: http
+      - key: MCP_STATELESS_HTTP
+        value: "true"
+      - key: MCP_JSON_RESPONSE
+        value: "false"
+      - key: OPENAI_ADS_MCP_READONLY
+        value: "1"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: OPENAI_ADS_API_KEY
+        sync: false
+      - key: MCP_BEARER_TOKEN
+        generateValue: true
