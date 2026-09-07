@@ -8,8 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MCP_TRANSPORT=http \
     MCP_STATELESS_HTTP=true \
     OPENAI_ADS_MCP_READONLY=1 \
-    HOST=0.0.0.0 \
-    PORT=8000
+    HOST=0.0.0.0
+# Render injects PORT at runtime (often 10000). Do not hardcode it.
 
 WORKDIR /build
 

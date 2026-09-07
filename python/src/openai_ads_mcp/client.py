@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,6 +25,28 @@ _FRIENDLY_ERRORS: dict[int, str] = {
     404: "Resource not found. Check the id and try again.",
     429: "Rate limited by the OpenAI Ads API. Wait a moment and retry.",
 }
+
+# Ads query arrays must use PHP-style brackets: fields[]=a&fields[]=b
+# httpx's default fields=a&fields=b is rejected as duplicate_parameter.
+
+
+def encode_ads_query_params(params: dict | None) -> list[tuple[str, str]] | None:
+    """Encode Ads API query params; list values become key[] repeats."""
+    if not params:
+        return None
+    encoded: list[tuple[str, str]] = []
+    for key, value in params.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            bracket_key = key if key.endswith("[]") else f"{key}[]"
+            for item in value:
+                if item is None:
+                    continue
+                encoded.append((bracket_key, str(item)))
+        else:
+            encoded.append((key, str(value)))
+    return encoded
 
 
 class OpenAIAdsAPIError(Exception):
@@ -49,13 +72,13 @@ class OpenAIAdsClient:
         self._client = httpx.AsyncClient(
             base_url=self._validate_base_url(base_url, "OPENAI_ADS_API_BASE_URL"),
             headers=headers,
-            timeout=60.0,
+            timeout=httpx.Timeout(60.0, connect=15.0),
             follow_redirects=False,
         )
         self._conversions_client = httpx.AsyncClient(
             base_url=self._validate_base_url(CONVERSIONS_BASE_URL, "CONVERSIONS_BASE_URL"),
             headers=headers,
-            timeout=60.0,
+            timeout=httpx.Timeout(60.0, connect=15.0),
             follow_redirects=False,
         )
 
@@ -97,39 +120,61 @@ class OpenAIAdsClient:
         redact_detail: bool = False,
         idempotency_key: str | None = None,
     ) -> dict:
-        try:
-            headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-            resp = await client.request(method, path.lstrip("/"), params=params, json=json, files=files, headers=headers)
-            resp.raise_for_status()
-            if not resp.content:
-                return {}
-            return resp.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            friendly = _FRIENDLY_ERRORS.get(status)
-            if friendly:
-                raise OpenAIAdsAPIError(status, friendly) from exc
-            if status >= 500:
-                request_id = exc.response.headers.get("x-request-id")
-                message = "OpenAI Ads API is temporarily unavailable. Please try again shortly."
-                if request_id:
-                    message = f"{message} Request ID: {request_id}"
-                raise OpenAIAdsAPIError(status, message) from exc
-            detail = f"HTTP {status}"
-            if not redact_detail:
-                try:
-                    body = exc.response.json()
-                    detail = body.get("detail") or body.get("message") or str(body)
-                except Exception:
-                    detail = exc.response.text or detail
-            raise OpenAIAdsAPIError(status, f"API error ({status}): {detail}") from exc
-        except httpx.TimeoutException as exc:
-            raise OpenAIAdsAPIError(504, "Request timed out. The OpenAI Ads API may be under heavy load.") from exc
-        except httpx.RequestError as exc:
-            raise OpenAIAdsAPIError(
-                0,
-                f"Network error contacting OpenAI Ads API: {exc.__class__.__name__}",
-            ) from exc
+        query = encode_ads_query_params(params)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        last_network_error: httpx.RequestError | None = None
+        for attempt in range(3):
+            try:
+                resp = await client.request(
+                    method,
+                    path.lstrip("/"),
+                    params=query,
+                    json=json,
+                    files=files,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                if not resp.content:
+                    return {}
+                return resp.json()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                friendly = _FRIENDLY_ERRORS.get(status)
+                if friendly:
+                    raise OpenAIAdsAPIError(status, friendly) from exc
+                if status >= 500:
+                    request_id = exc.response.headers.get("x-request-id")
+                    message = "OpenAI Ads API is temporarily unavailable. Please try again shortly."
+                    if request_id:
+                        message = f"{message} Request ID: {request_id}"
+                    raise OpenAIAdsAPIError(status, message) from exc
+                detail = f"HTTP {status}"
+                if not redact_detail:
+                    try:
+                        body = exc.response.json()
+                        detail = body.get("detail") or body.get("message") or str(body)
+                    except Exception:
+                        detail = exc.response.text or detail
+                raise OpenAIAdsAPIError(status, f"API error ({status}): {detail}") from exc
+            except httpx.TimeoutException as exc:
+                last_network_error = exc
+                if attempt >= 2:
+                    raise OpenAIAdsAPIError(
+                        504, "Request timed out. The OpenAI Ads API may be under heavy load."
+                    ) from exc
+            except httpx.RequestError as exc:
+                last_network_error = exc
+                if attempt >= 2:
+                    raise OpenAIAdsAPIError(
+                        0,
+                        f"Network error contacting OpenAI Ads API: {exc.__class__.__name__}",
+                    ) from exc
+            await asyncio.sleep(0.35 * (attempt + 1))
+        raise OpenAIAdsAPIError(
+            0,
+            f"Network error contacting OpenAI Ads API: "
+            f"{last_network_error.__class__.__name__ if last_network_error else 'RequestError'}",
+        )
 
     @staticmethod
     def _validate_base_url(base_url: str, env_name: str) -> str:

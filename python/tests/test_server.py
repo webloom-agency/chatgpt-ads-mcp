@@ -325,6 +325,33 @@ class TestInsights:
         }
         assert json.loads(params["filters"][0])["operator"] == "GREATER_THAN"
         assert json.loads(params["sort"][0])["direction"] == "desc"
+        assert params["fields"] == ["campaign.id", "metadata.readable_time"]
+
+    @pytest.mark.asyncio
+    async def test_get_insights_defaults_metric_fields(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        await get_insights(scope="account")
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["aggregation_level"] == "campaign"
+        assert "impressions" in params["fields"]
+        assert "clicks" in params["fields"]
+        assert "spend" in params["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_insights_hour_aligns_unix_range(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        # Misaligned end (16:53:20) should ceil to next hour.
+        await get_insights(
+            scope="account",
+            time_range={"type": "unix_range", "start": 1786176000, "end": 1788800000},
+        )
+        params = mock_client.get.call_args.kwargs["params"]
+        encoded = json.loads(params["time_ranges"][0])
+        assert encoded["start"] == 1786176000
+        assert encoded["end"] == 1788800400
+        assert encoded["end"] % 3600 == 0
 
     @pytest.mark.asyncio
     async def test_get_insights_product_include_rules(self, mock_client):
@@ -838,6 +865,19 @@ class TestConversions:
 
 
 class TestErrorHandling:
+    def test_encode_ads_query_params_uses_brackets(self):
+        from openai_ads_mcp.client import encode_ads_query_params
+
+        encoded = encode_ads_query_params(
+            {"fields": ["impressions", "clicks"], "limit": 20, "time_ranges": ['{"type":"unix_range"}']}
+        )
+        assert encoded == [
+            ("fields[]", "impressions"),
+            ("fields[]", "clicks"),
+            ("limit", "20"),
+            ("time_ranges[]", '{"type":"unix_range"}'),
+        ]
+
     def test_soft_statuses_return_json(self):
         from openai_ads_mcp._core import _err
 

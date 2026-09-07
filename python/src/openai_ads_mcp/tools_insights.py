@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from ._core import *
 
 _INSIGHT_SCOPES = {"account", "campaign", "ad_group", "ad"}
@@ -18,6 +20,33 @@ _SEGMENT_GROUP_ORDER_VALUES = {"ad_account", "campaign", "ad_group", "ad", "prod
 _INCLUDES = {"zero_impression_items", "zero_impression_products"}
 _TIME_RANGE_TYPES = {"unix_range", "hour_range", "date_range"}
 
+# Without fields[], Ads only returns id/start/end — metrics stay empty for clients.
+_DEFAULT_INSIGHT_FIELDS = [
+    "impressions",
+    "clicks",
+    "spend",
+    "ctr",
+    "cpc",
+    "cpm",
+    "conversions",
+    "campaign.id",
+    "campaign.name",
+    "ad_group.id",
+    "ad_group.name",
+    "ad.id",
+    "ad.name",
+    "metadata.readable_time",
+]
+_SUMMARY_METRIC_KEYS = (
+    "impressions",
+    "clicks",
+    "spend",
+    "ctr",
+    "cpc",
+    "cpm",
+    "conversions",
+)
+
 
 def _insights_path(scope: str, entity_id: str | None) -> tuple[str | None, str | None]:
     if scope == "account":
@@ -33,18 +62,42 @@ def _insights_path(scope: str, entity_id: str | None) -> tuple[str | None, str |
     return None, _bad_request("scope must be account, campaign, ad_group, or ad.")
 
 
+def _align_unix_hour(value: int, *, round_up: bool = False) -> int:
+    """Ads requires unix_range bounds on full-hour boundaries."""
+    if value % 3600 == 0:
+        return value
+    floored = value - (value % 3600)
+    return floored + 3600 if round_up else floored
+
+
 def _normalize_time_range(value: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     range_type = value.get("type")
     if isinstance(range_type, str):
         if range_type not in _TIME_RANGE_TYPES:
             return None, _bad_request("time_range.type must be unix_range, hour_range, or date_range.")
+        if range_type == "unix_range":
+            start = value.get("start")
+            end = value.get("end")
+            if not isinstance(start, int) or not isinstance(end, int):
+                return None, _bad_request("unix_range requires integer start and end (Unix seconds).")
+            start = _align_unix_hour(start, round_up=False)
+            end = _align_unix_hour(end, round_up=True)
+            if end <= start:
+                return None, _bad_request(
+                    "unix_range end must be after start after hour alignment. "
+                    "Prefer omitting time_range (API defaults to recent days) or use full-hour timestamps."
+                )
+            now = int(datetime.now(timezone.utc).timestamp())
+            if start > now + 3600:
+                return None, _bad_request("unix_range start is in the future.")
+            return {"type": "unix_range", "start": start, "end": end}, None
         return value, None
 
     legacy_keys = [key for key in _TIME_RANGE_TYPES if isinstance(value.get(key), dict)]
     if len(legacy_keys) != 1:
         return None, _bad_request("time_range must include type: unix_range, hour_range, or date_range.")
     range_type = legacy_keys[0]
-    return {"type": range_type, **value[range_type]}, None
+    return _normalize_time_range({"type": range_type, **value[range_type]})
 
 
 def _one_time_range(value: Any) -> tuple[list[str] | None, str | None]:
@@ -110,6 +163,108 @@ def _validate_sort(value: Any) -> tuple[list[str] | None, str | None]:
     return encoded, None
 
 
+def _row_metric(row: dict[str, Any], key: str) -> Any:
+    if key in row:
+        return row[key]
+    metrics = row.get("metrics")
+    if isinstance(metrics, dict) and key in metrics:
+        return metrics[key]
+    return None
+
+
+def _summarize_insights(payload: Any) -> dict[str, Any] | None:
+    """Build a compact, LLM-friendly rollup so clients are not stuck on opaque list ids."""
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("data")
+    if not isinstance(rows, list) or not rows:
+        return {"row_count": 0, "note": "No insight rows returned for this query."}
+
+    totals: dict[str, float] = {key: 0.0 for key in ("impressions", "clicks", "spend", "conversions")}
+    campaigns: dict[str, dict[str, Any]] = {}
+    sample_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in totals:
+            value = _row_metric(row, key)
+            if isinstance(value, (int, float)):
+                totals[key] += float(value)
+
+        campaign = row.get("campaign") if isinstance(row.get("campaign"), dict) else {}
+        campaign_id = campaign.get("id") or row.get("campaign.id") or row.get("entity_id") or row.get("id")
+        campaign_name = campaign.get("name") or row.get("campaign.name")
+        if isinstance(campaign_id, str):
+            bucket = campaigns.setdefault(
+                campaign_id,
+                {
+                    "campaign_id": campaign_id,
+                    "campaign_name": campaign_name,
+                    "impressions": 0.0,
+                    "clicks": 0.0,
+                    "spend": 0.0,
+                    "conversions": 0.0,
+                },
+            )
+            if campaign_name and not bucket.get("campaign_name"):
+                bucket["campaign_name"] = campaign_name
+            for key in ("impressions", "clicks", "spend", "conversions"):
+                value = _row_metric(row, key)
+                if isinstance(value, (int, float)):
+                    bucket[key] += float(value)
+
+        if len(sample_rows) < 10:
+            sample = {
+                key: _row_metric(row, key)
+                for key in _SUMMARY_METRIC_KEYS
+                if _row_metric(row, key) is not None
+            }
+            readable = row.get("metadata", {})
+            if isinstance(readable, dict) and readable.get("readable_time"):
+                sample["readable_time"] = readable["readable_time"]
+            elif row.get("metadata.readable_time"):
+                sample["readable_time"] = row["metadata.readable_time"]
+            if campaign_name:
+                sample["campaign_name"] = campaign_name
+            if campaign_id:
+                sample["campaign_id"] = campaign_id
+            if row.get("start_time") is not None:
+                sample["start_time"] = row.get("start_time")
+            if row.get("end_time") is not None:
+                sample["end_time"] = row.get("end_time")
+            if sample:
+                sample_rows.append(sample)
+
+    by_campaign = sorted(
+        campaigns.values(),
+        key=lambda item: item.get("spend", 0),
+        reverse=True,
+    )[:20]
+    for item in by_campaign:
+        impressions = item.get("impressions") or 0
+        clicks = item.get("clicks") or 0
+        spend = item.get("spend") or 0
+        item["ctr"] = (clicks / impressions) if impressions else None
+        item["cpc"] = (spend / clicks) if clicks else None
+        item["cpm"] = ((spend / impressions) * 1000) if impressions else None
+
+    impressions = totals["impressions"]
+    clicks = totals["clicks"]
+    spend = totals["spend"]
+    return {
+        "row_count": len(rows),
+        "totals": {
+            **totals,
+            "ctr": (clicks / impressions) if impressions else None,
+            "cpc": (spend / clicks) if clicks else None,
+            "cpm": ((spend / impressions) * 1000) if impressions else None,
+        },
+        "by_campaign": by_campaign,
+        "sample_rows": sample_rows,
+    }
+
+
 @ads_tool(open_world=True)
 async def get_insights(
     scope: Literal["account", "campaign", "ad_group", "ad"],
@@ -130,15 +285,12 @@ async def get_insights(
 ) -> str:
     """Get performance insights for account, campaign, ad group, or ad scope.
 
-    This is the main reporting tool. It maps to the four Ads insights
-    endpoints and returns impressions, clicks, spend, CTR, CPC, CPM, and
-    conversions when requested by the API.
+    Prefer omitting time_range so the API uses its recent default window.
+    If you pass unix_range, start/end must be Unix seconds on full-hour
+    boundaries (this tool hour-aligns them). Do not invent far-future ranges.
 
-    Use scope='account' for account-wide reporting. For scope='campaign',
-    'ad_group', or 'ad', pass entity_id. time_range should be one JSON object,
-    for example {"type":"unix_range","start":1764547200,"end":1765152000}. filters
-    and sort are lists of JSON objects. segments can be product, country, or
-    device, with at most one segment per request.
+    Defaults fields to impressions, clicks, spend, ctr, cpc, cpm, conversions,
+    and names so responses include usable metrics. Returns a `summary` rollup.
 
     Args:
         scope: account, campaign, ad_group, or ad.
@@ -146,7 +298,7 @@ async def get_insights(
         time_granularity: hourly, daily, monthly, or none. Default daily.
         time_range: Optional JSON object for unix_range, hour_range, or date_range.
         segments: Optional segment list: product, country, or device.
-        fields: Optional list of fields, such as campaign.id or metadata.readable_time.
+        fields: Optional list of fields. Defaults to core metrics + names.
         filters: Optional list of JSON filter objects.
         sort: Optional list of JSON sort objects with field and direction.
         limit: Rows per page, 1-2000. Default 20.
@@ -182,6 +334,8 @@ async def get_insights(
     field_values, fields_err = _coerce_string_list(fields, "fields")
     if fields_err:
         return fields_err
+    if field_values is None:
+        field_values = list(_DEFAULT_INSIGHT_FIELDS)
     if segment_values and segment_values[0] == "product" and not (
         field_values and ("product.feed_id" in field_values or "product.item_id" in field_values)
     ):
@@ -226,6 +380,9 @@ async def get_insights(
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
+    # Account-level campaign rollups are the usual "how are campaigns doing?" ask.
+    if scope == "account" and aggregation_level is None and not segment_values:
+        aggregation_level = "campaign"
     params = _optional_params(
         time_granularity=time_granularity,
         aggregation_level=aggregation_level,
@@ -241,10 +398,14 @@ async def get_insights(
         before=before,
     )
     try:
+        payload = await client.get(path, params=params)
+        summary = _summarize_insights(payload)
+        if isinstance(payload, dict) and summary is not None:
+            payload = {**payload, "summary": summary}
         return _ok_sized(
-            await client.get(path, params=params),
+            payload,
             response_format,
-            follow_up="Use after or before cursors, narrow time_range, or request fewer fields.",
+            follow_up="Use after or before cursors, narrow time_range, or request fewer fields. Prefer omitting time_range for the API default recent window.",
         )
     except OpenAIAdsAPIError as e:
         return _err(e)
