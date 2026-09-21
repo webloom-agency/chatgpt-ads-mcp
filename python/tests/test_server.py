@@ -415,6 +415,32 @@ class TestInsights:
         assert data["summary"]["by_campaign"][0]["campaign_name"] == "Brand"
 
     @pytest.mark.asyncio
+    async def test_account_metric_grain_matches_aggregation(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        await get_insights(
+            scope="account",
+            time_granularity="none",
+            fields=["ad_account.impressions", "ad_account.spend", "metadata.readable_time"],
+            time_range={"type": "unix_range", "start": 1789941600, "end": 1789995600},
+        )
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["aggregation_level"] == "ad_account"
+        assert params["fields"] == ["ad_account.impressions", "ad_account.spend"]
+        applied = json.loads(params["time_ranges"][0])
+        assert applied["start"] == 1789941600
+        assert applied["end"] == 1789995600
+
+        mock_client.get.reset_mock()
+        result = await get_insights(
+            scope="account",
+            aggregation_level="campaign",
+            fields=["ad_account.impressions"],
+        )
+        assert result.isError is True
+        mock_client.get.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_get_insights_hour_aligns_unix_range(self, mock_client):
         from openai_ads_mcp.tools_insights import get_insights
 

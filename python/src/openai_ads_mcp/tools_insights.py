@@ -73,6 +73,8 @@ _FIELD_ENTITY_BY_SCOPE = {
     "ad_group": "ad_group",
     "ad": "ad",
 }
+_TIME_BUCKET_FIELDS = {"metadata.readable_time", "metadata.timezone"}
+_AGGREGATION_ENTITIES = {"ad_account", "campaign", "ad_group", "ad"}
 
 
 def _insights_path(scope: str, entity_id: str | None) -> tuple[str | None, str | None]:
@@ -196,15 +198,85 @@ def _field_entity(scope: str, aggregation_level: str | None) -> str:
     return _FIELD_ENTITY_BY_SCOPE[scope]
 
 
-def _default_insight_fields(entity: str) -> list[str]:
+def _default_insight_fields(entity: str, *, include_time: bool = True) -> list[str]:
     fields = [
         f"{entity}.id",
         f"{entity}.name",
         *(f"{entity}.{metric}" for metric in _INSIGHT_METRICS),
-        "metadata.readable_time",
-        "metadata.timezone",
     ]
+    if include_time:
+        fields.extend(("metadata.readable_time", "metadata.timezone"))
     return [field for field in fields if field in _INSIGHT_FIELDS]
+
+
+def _metric_entities(fields: list[str]) -> set[str]:
+    found: set[str] = set()
+    for field in fields:
+        entity, sep, rest = field.partition(".")
+        if sep and entity in _AGGREGATION_ENTITIES and rest in _INSIGHT_METRICS:
+            found.add(entity)
+    return found
+
+
+def _resolve_aggregation(
+    scope: str,
+    aggregation_level: str | None,
+    fields: list[str],
+    *,
+    has_segments: bool,
+) -> tuple[str | None, str | None]:
+    """Pick a grain the Ads API will accept for these metric fields."""
+    entities = _metric_entities(fields)
+    if len(entities) > 1:
+        return None, _bad_request(
+            "Metric fields must use one grain. Use ad_account.* with aggregation_level=ad_account "
+            "for an account total, or campaign.* with aggregation_level=campaign for a campaign breakdown."
+        )
+    metric_entity = next(iter(entities)) if entities else None
+    if aggregation_level and metric_entity and metric_entity != aggregation_level:
+        return None, _bad_request(
+            f"fields use {metric_entity}.* metrics but aggregation_level is {aggregation_level}. "
+            f"Use {aggregation_level}.impressions or set aggregation_level={metric_entity}."
+        )
+    if aggregation_level is None and scope == "account" and not has_segments:
+        aggregation_level = metric_entity or "campaign"
+    return aggregation_level, None
+
+
+def _without_time_bucket_fields(fields: list[str], time_granularity: str) -> tuple[list[str], bool]:
+    """metadata.readable_time requires a time bucket. time_granularity=none rejects it."""
+    if time_granularity != "none":
+        return fields, False
+    kept = [field for field in fields if field not in _TIME_BUCKET_FIELDS]
+    return kept, len(kept) != len(fields)
+
+
+def _applied_time_range(time_ranges: list[str] | None) -> dict[str, Any] | None:
+    if not time_ranges:
+        return None
+    try:
+        parsed = json.loads(time_ranges[0])
+    except json.JSONDecodeError:
+        return None
+    if parsed.get("type") != "unix_range":
+        return {"type": parsed.get("type")}
+    start = parsed.get("start")
+    end = parsed.get("end")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return None
+    duration_hours = (end - start) / 3600
+    applied: dict[str, Any] = {
+        "type": "unix_range",
+        "start": start,
+        "end": end,
+        "duration_hours": duration_hours,
+    }
+    if duration_hours < 24:
+        applied["note"] = (
+            f"This window is {duration_hours:g} hours. A calendar week is 168 hours, "
+            "from Monday 00:00 in the account timezone through the current hour."
+        )
+    return applied
 
 
 def _canonical_insight_field(field: str, entity: str) -> str | None:
@@ -401,12 +473,23 @@ async def get_insights(
     and cpm are rewritten to the aggregation entity. conversions,
     conversion_rate, conversion_value, and roas are not insight fields.
 
+    Account totals use aggregation_level=ad_account and ad_account.* metrics.
+    A campaign breakdown uses aggregation_level=campaign and campaign.* metrics.
+    Do not mix those grains. time_granularity=none is one total and cannot
+    include metadata.readable_time.
+
+    A calendar week starts Monday 00:00 in the account timezone and ends at
+    the current hour. On Monday that window is only the current day; the
+    response includes duration_hours so a short window is not reported as a
+    full week. Use time_granularity=daily for a multi-day week.
+
     Prefer omitting time_range so the API uses its recent default window.
     If you pass unix_range, start/end must be Unix seconds on full-hour
     boundaries (this tool hour-aligns them). Do not invent far-future ranges.
 
-    Omitting fields uses the aggregation entity's id, name, and core metrics
-    plus metadata.readable_time. Returns a summary rollup.
+    Omitting fields uses the aggregation entity's id, name, and core metrics.
+    Daily, hourly, and monthly queries also include metadata.readable_time.
+    Returns a summary rollup.
 
     Args:
         scope: account, campaign, ad_group, or ad.
@@ -452,11 +535,21 @@ async def get_insights(
         return fields_err
     field_entity = _field_entity(scope, aggregation_level)
     if field_values is None:
-        field_values = _default_insight_fields(field_entity)
+        field_values = _default_insight_fields(field_entity, include_time=time_granularity != "none")
     else:
         field_values, normalize_err = _normalize_insight_fields(field_values, field_entity)
         if normalize_err:
             return normalize_err
+    field_values, stripped_time_fields = _without_time_bucket_fields(field_values, time_granularity)
+    aggregation_level, aggregation_err = _resolve_aggregation(
+        scope,
+        aggregation_level,
+        field_values,
+        has_segments=bool(segment_values),
+    )
+    if aggregation_err:
+        return aggregation_err
+    field_entity = _field_entity(scope, aggregation_level)
     if segment_values and segment_values[0] == "product" and not (
         field_values and ("product.feed_id" in field_values or "product.item_id" in field_values)
     ):
@@ -501,9 +594,6 @@ async def get_insights(
     client, client_err = _get_client_or_error()
     if client_err:
         return client_err
-    # Account-level campaign rollups are the usual "how are campaigns doing?" ask.
-    if scope == "account" and aggregation_level is None and not segment_values:
-        aggregation_level = "campaign"
     params = _optional_params(
         time_granularity=time_granularity,
         aggregation_level=aggregation_level,
@@ -523,6 +613,14 @@ async def get_insights(
         summary = _summarize_insights(payload, field_entity)
         if isinstance(payload, dict) and summary is not None:
             payload = {**payload, "summary": summary}
+        applied = _applied_time_range(time_ranges)
+        if isinstance(payload, dict) and applied is not None:
+            payload = {**payload, "applied_time_range": applied}
+        if isinstance(payload, dict) and stripped_time_fields:
+            payload = {
+                **payload,
+                "fields_note": "Dropped metadata.readable_time and metadata.timezone because time_granularity=none has no time bucket.",
+            }
         return _ok_sized(
             payload,
             response_format,

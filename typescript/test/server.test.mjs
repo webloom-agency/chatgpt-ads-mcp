@@ -741,7 +741,20 @@ test("get_insights maps shorthand metrics and rejects unknown ones", async () =>
     "metadata.readable_time",
     "metadata.timezone",
   ]);
-  assert.equal(mockClient.calls.at(-1).params.aggregation_level, undefined);
+  assert.equal(mockClient.calls.at(-1).params.aggregation_level, "campaign");
+
+  mockClient.calls.length = 0;
+  await callTool("get_insights", {
+    scope: "account",
+    time_granularity: "none",
+    fields: ["ad_account.impressions", "ad_account.clicks", "ad_account.spend", "metadata.readable_time"],
+  });
+  assert.equal(mockClient.calls.at(-1).params.aggregation_level, "ad_account");
+  assert.deepEqual(mockClient.calls.at(-1).params.fields, [
+    "ad_account.impressions",
+    "ad_account.clicks",
+    "ad_account.spend",
+  ]);
 });
 
 test("create_campaign defaults paused and applies budget guard", async () => {

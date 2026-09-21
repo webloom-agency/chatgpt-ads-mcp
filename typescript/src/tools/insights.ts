@@ -81,19 +81,66 @@ const FIELD_ENTITY_BY_SCOPE: Record<string, string> = {
   ad_group: "ad_group",
   ad: "ad",
 };
+const TIME_BUCKET_FIELDS = new Set(["metadata.readable_time", "metadata.timezone"]);
+const AGGREGATION_ENTITIES = new Set(["ad_account", "campaign", "ad_group", "ad"]);
 
 function fieldEntity(scope: string, aggregationLevel: string | undefined): string {
   return aggregationLevel ?? FIELD_ENTITY_BY_SCOPE[scope];
 }
 
-function defaultInsightFields(entity: string): string[] {
-  return [
+function defaultInsightFields(entity: string, includeTime = true): string[] {
+  const fields = [
     `${entity}.id`,
     `${entity}.name`,
     ...INSIGHT_METRICS.map((metric) => `${entity}.${metric}`),
-    "metadata.readable_time",
-    "metadata.timezone",
-  ].filter((field) => INSIGHT_FIELDS.has(field));
+  ];
+  if (includeTime) {
+    fields.push("metadata.readable_time", "metadata.timezone");
+  }
+  return fields.filter((field) => INSIGHT_FIELDS.has(field));
+}
+
+function metricEntities(fields: string[]): Set<string> {
+  const found = new Set<string>();
+  for (const field of fields) {
+    const [entity, rest] = field.split(".");
+    if (entity && rest && AGGREGATION_ENTITIES.has(entity) && INSIGHT_METRICS.includes(rest)) {
+      found.add(entity);
+    }
+  }
+  return found;
+}
+
+function resolveAggregation(
+  scope: string,
+  aggregationLevel: string | undefined,
+  fields: string[],
+  hasSegments: boolean,
+): [string | undefined, string | null] {
+  const entities = metricEntities(fields);
+  if (entities.size > 1) {
+    return [undefined, badRequest(
+      "Metric fields must use one grain. Use ad_account.* with aggregation_level=ad_account " +
+      "for an account total, or campaign.* with aggregation_level=campaign for a campaign breakdown.",
+    )];
+  }
+  const metricEntity = entities.values().next().value as string | undefined;
+  if (aggregationLevel && metricEntity && metricEntity !== aggregationLevel) {
+    return [undefined, badRequest(
+      `fields use ${metricEntity}.* metrics but aggregation_level is ${aggregationLevel}. ` +
+      `Use ${aggregationLevel}.impressions or set aggregation_level=${metricEntity}.`,
+    )];
+  }
+  if (!aggregationLevel && scope === "account" && !hasSegments) {
+    return [metricEntity ?? "campaign", null];
+  }
+  return [aggregationLevel, null];
+}
+
+function withoutTimeBucketFields(fields: string[], timeGranularity: string): [string[], boolean] {
+  if (timeGranularity !== "none") return [fields, false];
+  const kept = fields.filter((field) => !TIME_BUCKET_FIELDS.has(field));
+  return [kept, kept.length !== fields.length];
 }
 
 function canonicalInsightField(field: string, entity: string): string | null {
@@ -243,12 +290,22 @@ async function getInsights(args: ToolArgs): Promise<string> {
   const entity = fieldEntity(scope, aggregationLevel);
   let normalizedFields = fields;
   if (!normalizedFields) {
-    normalizedFields = defaultInsightFields(entity);
+    normalizedFields = defaultInsightFields(entity, timeGranularity !== "none");
   } else {
     const [mapped, normalizeError] = normalizeInsightFields(normalizedFields, entity);
     if (normalizeError || !mapped) return normalizeError ?? badRequest("fields could not be normalized.");
     normalizedFields = mapped;
   }
+  const [fieldsWithoutTime] = withoutTimeBucketFields(normalizedFields, timeGranularity);
+  normalizedFields = fieldsWithoutTime;
+  const [resolvedAggregation, aggregationResolveError] = resolveAggregation(
+    scope,
+    aggregationLevel,
+    normalizedFields,
+    Boolean(segments?.length),
+  );
+  if (aggregationResolveError) return aggregationResolveError;
+  const requestAggregation = resolvedAggregation;
   if (segments?.[0] === "product" && !(normalizedFields?.includes("product.feed_id") || normalizedFields?.includes("product.item_id"))) {
     return badRequest("product segments require fields to include product.feed_id or product.item_id.");
   }
@@ -291,7 +348,7 @@ async function getInsights(args: ToolArgs): Promise<string> {
     return okSized(
       await client!.get(path!, optionalParams({
         time_granularity: timeGranularity,
-        aggregation_level: aggregationLevel,
+        aggregation_level: requestAggregation,
         time_ranges: timeRanges,
         segments,
         override_segment_group_order: overrideSegmentGroupOrder,
@@ -315,7 +372,7 @@ export const insightTools: AdsToolDefinition[] = [
   {
     name: "get_insights",
     description:
-      "Get ChatGPT Ads performance insights for an account, campaign, ad group, or ad. This is OpenAI Ads, not Google Ads. Use dotted fields such as campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, campaign.id, campaign.name, and metadata.readable_time. Shorthand impressions, clicks, spend, ctr, cpc, and cpm are rewritten to the aggregation entity. conversions, conversion_rate, conversion_value, and roas are not insight fields. Omitting fields uses the aggregation entity's id, name, and core metrics.",
+      "Get ChatGPT Ads performance insights for an account, campaign, ad group, or ad. This is OpenAI Ads, not Google Ads. Use dotted fields such as campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, campaign.id, and campaign.name. Account totals use aggregation_level=ad_account with ad_account.* metrics. Campaign breakdowns use aggregation_level=campaign with campaign.* metrics. Do not mix those grains. time_granularity=none is one total and cannot include metadata.readable_time. A calendar week starts Monday 00:00 in the account timezone and ends at the current hour; on Monday that window is only the current day. Use time_granularity=daily for a multi-day week. Shorthand impressions, clicks, spend, ctr, cpc, and cpm are rewritten to the aggregation entity. conversions, conversion_rate, conversion_value, and roas are not insight fields.",
     inputSchema: {
       scope: z.enum(["account", "campaign", "ad_group", "ad"]),
       entity_id: z.string().optional(),
