@@ -530,6 +530,32 @@ class TestPerformance:
         assert "campaign.spend" in delivery_params["fields"]
 
     @pytest.mark.asyncio
+    async def test_get_performance_maps_ad_account_to_campaign(self, mock_client):
+        from openai_ads_mcp.tools_performance import get_performance
+
+        mock_client.get = AsyncMock(side_effect=[
+            {"id": "acct_1", "timezone": "Europe/Paris"},
+            {"data": [{"id": "camp_1", "name": "Launch"}], "has_more": False},
+            {
+                "data": [{
+                    "campaign": {"id": "camp_1", "name": "Launch", "impressions": 10, "clicks": 2, "spend": 5},
+                }],
+            },
+        ])
+        mock_client.post = AsyncMock(return_value={"data": [{"entity_id": "camp_1", "conversions": 1}]})
+
+        data = _tool_data(await get_performance(
+            aggregation_level="ad_account",
+            start_date="2026-09-21",
+            end_date="2026-09-21",
+        ))
+        assert data["aggregation_level"] == "campaign"
+        assert data["requested_aggregation_level"] == "ad_account"
+        assert data["totals"]["conversions"] == 1
+        assert mock_client.post.call_args.kwargs["json"]["aggregation_level"] == "campaign"
+        assert mock_client.get.call_args_list[2].kwargs["params"]["aggregation_level"] == "campaign"
+
+    @pytest.mark.asyncio
     async def test_get_performance_requires_paired_dates(self, mock_client):
         from openai_ads_mcp.tools_performance import get_performance
 

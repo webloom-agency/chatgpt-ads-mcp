@@ -15,7 +15,12 @@ import {
   type ToolArgs,
 } from "../core.js";
 
-const PERF_LEVELS = new Set(["campaign", "ad_account"]);
+const PERF_LEVELS = new Set(["campaign", "ad_group", "ad", "ad_account"]);
+const CONVERSION_LEVELS = new Set(["campaign", "ad_group", "ad"]);
+
+function apiAggregationLevel(level: string): string {
+  return level === "ad_account" ? "campaign" : level;
+}
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseDate(name: string, value: unknown): [string | null, string | null] {
@@ -212,7 +217,11 @@ async function listCampaignIds(client: AdsClientLike): Promise<[string[], Record
 async function getPerformance(args: ToolArgs): Promise<string> {
   const aggregationLevel = String(args.aggregation_level ?? "campaign");
   if (!PERF_LEVELS.has(aggregationLevel)) {
-    return badRequest("aggregation_level must be campaign or ad_account.");
+    return badRequest("aggregation_level must be campaign, ad_group, ad, or ad_account.");
+  }
+  const apiLevel = apiAggregationLevel(aggregationLevel);
+  if (!CONVERSION_LEVELS.has(apiLevel)) {
+    return badRequest("aggregation_level must be campaign, ad_group, ad, or ad_account.");
   }
   if (args.average_order_value !== undefined && args.average_order_value !== null && Number(args.average_order_value) < 0) {
     return badRequest("average_order_value must be >= 0.");
@@ -238,7 +247,6 @@ async function getPerformance(args: ToolArgs): Promise<string> {
   try {
     const account = await client!.get("/ad_account");
     const timezoneName = isRecord(account) && typeof account.timezone === "string" ? account.timezone : "UTC";
-    const accountId = isRecord(account) && typeof account.id === "string" ? account.id : null;
     let start = startDate;
     let end = endDate;
     if (!start || !end) {
@@ -258,34 +266,36 @@ async function getPerformance(args: ToolArgs): Promise<string> {
     let campaignNames: Record<string, string> = {};
     let ids = entityIdsInput ?? [];
     if (!ids.length) {
-      if (aggregationLevel === "ad_account") {
-        if (!accountId) return badRequest("Could not resolve ad account id from get_account.");
-        ids = [accountId];
-      } else {
-        [ids, campaignNames] = await listCampaignIds(client!);
-        if (!ids.length) {
-          return okSized({
-            aggregation_level: aggregationLevel,
-            start_date: start,
-            end_date: end,
-            timezone: timezoneName,
-            rows: [],
-            totals: efficiencyRow({
-              entityId: "totals",
-              entityName: "totals",
-              impressions: 0,
-              clicks: 0,
-              spend: 0,
-              conversions: 0,
-              conversionValue: null,
-            }),
-            notes: ["No campaigns found. Create or activate campaigns before reading performance."],
-          }, String(args.response_format ?? "concise"));
-        }
+      if (apiLevel !== "campaign") {
+        return badRequest(
+          `entity_ids are required when aggregation_level=${aggregationLevel}. ` +
+          "Omit entity_ids only with campaign or ad_account (all campaigns).",
+        );
+      }
+      [ids, campaignNames] = await listCampaignIds(client!);
+      if (!ids.length) {
+        return okSized({
+          aggregation_level: apiLevel,
+          requested_aggregation_level: aggregationLevel,
+          start_date: start,
+          end_date: end,
+          timezone: timezoneName,
+          rows: [],
+          totals: efficiencyRow({
+            entityId: "totals",
+            entityName: "totals",
+            impressions: 0,
+            clicks: 0,
+            spend: 0,
+            conversions: 0,
+            conversionValue: null,
+          }),
+          notes: ["No campaigns found. Create or activate campaigns before reading performance."],
+        }, String(args.response_format ?? "concise"));
       }
     }
 
-    const entity = aggregationLevel;
+    const entity = apiLevel;
     const deliveryFields = [
       `${entity}.id`,
       `${entity}.name`,
@@ -298,13 +308,13 @@ async function getPerformance(args: ToolArgs): Promise<string> {
     ];
     const delivery = await client!.get("/ad_account/insights", optionalParams({
       time_granularity: "none",
-      aggregation_level: aggregationLevel,
+      aggregation_level: apiLevel,
       time_ranges: [JSON.stringify({ type: "unix_range", start: startUnix, end: endUnix })],
       fields: deliveryFields,
       limit: Math.min(Math.max(ids.length, 20), 2000),
     }));
     const conversions = await client!.post("/conversions/insights", {
-      aggregation_level: aggregationLevel,
+      aggregation_level: apiLevel,
       time_ranges: [`${start}:${end}`],
       entity_ids: ids,
     });
@@ -381,9 +391,15 @@ async function getPerformance(args: ToolArgs): Promise<string> {
 
     const totals = sumRows(rows);
     const notes = [
+      "This is ChatGPT Ads / OpenAI Ads reporting, not Google Ads.",
       "Delivery metrics come from /ad_account/insights; conversion counts come from /conversions/insights.",
       "CPA = spend / conversions. conversion_rate = conversions / clicks.",
     ];
+    if (aggregationLevel === "ad_account") {
+      notes.push(
+        "aggregation_level=ad_account is rolled up from campaign rows because /conversions/insights only accepts campaign, ad_group, or ad.",
+      );
+    }
     if (totals.conversion_value === null) {
       notes.push(
         "ROAS is null because Ads conversion insights return counts only. Pass average_order_value or conversion_value_by_entity to estimate revenue.",
@@ -396,7 +412,8 @@ async function getPerformance(args: ToolArgs): Promise<string> {
     }
 
     return okSized({
-      aggregation_level: aggregationLevel,
+      aggregation_level: apiLevel,
+      requested_aggregation_level: aggregationLevel,
       start_date: start,
       end_date: end,
       timezone: timezoneName,
@@ -420,9 +437,9 @@ export const performanceTools: AdsToolDefinition[] = [
   {
     name: "get_performance",
     description:
-      "Join ChatGPT Ads delivery spend with attributed conversion counts and compute CPA, conversion_rate, and ROAS. Delivery insights have no conversions; this tool calls both APIs. Pass average_order_value or conversion_value_by_entity for ROAS. Dates are inclusive YYYY-MM-DD in the account timezone (default last 7 days).",
+      "Join ChatGPT Ads (not Google Ads) delivery spend with attributed conversion counts and compute CPA, conversion_rate, and ROAS. Use aggregation_level=campaign (default). ad_account is accepted as a shortcut and rolled up from campaigns because /conversions/insights rejects ad_account. Pass average_order_value or conversion_value_by_entity for ROAS. Dates are inclusive YYYY-MM-DD in the account timezone (default last 7 days).",
     inputSchema: {
-      aggregation_level: z.enum(["campaign", "ad_account"]).default("campaign"),
+      aggregation_level: z.enum(["campaign", "ad_group", "ad", "ad_account"]).default("campaign"),
       start_date: z.string().optional(),
       end_date: z.string().optional(),
       entity_ids: z.any().optional(),

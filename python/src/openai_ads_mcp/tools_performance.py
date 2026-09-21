@@ -9,7 +9,15 @@ from zoneinfo import ZoneInfo
 from ._core import *
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_PERF_LEVELS = {"campaign", "ad_account"}
+_PERF_LEVELS = {"campaign", "ad_group", "ad", "ad_account"}
+_CONVERSION_LEVELS = {"campaign", "ad_group", "ad"}
+
+
+def _api_aggregation_level(level: str) -> str:
+    """Conversion insights reject ad_account; roll account totals up from campaigns."""
+    if level == "ad_account":
+        return "campaign"
+    return level
 
 
 def _parse_date(name: str, value: str | None) -> tuple[date | None, str | None]:
@@ -202,7 +210,7 @@ async def _list_campaign_ids(client: OpenAIAdsClient) -> tuple[list[str], dict[s
 
 @ads_tool(open_world=True)
 async def get_performance(
-    aggregation_level: Literal["campaign", "ad_account"] = "campaign",
+    aggregation_level: Literal["campaign", "ad_group", "ad", "ad_account"] = "campaign",
     start_date: str | None = None,
     end_date: str | None = None,
     entity_ids: Any = None,
@@ -210,24 +218,32 @@ async def get_performance(
     conversion_value_by_entity: Any = None,
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> str:
-    """Join delivery insights with attributed conversions and compute efficiency metrics.
+    """Join ChatGPT Ads delivery insights with attributed conversions and compute CPA/ROAS.
 
-    ChatGPT Ads delivery reporting has no conversions/ROAS fields. This tool:
+    This is OpenAI Ads / ChatGPT Ads, not Google Ads. Delivery reporting has no
+    conversions/ROAS fields, so this tool:
     1. Pulls impressions, clicks, and spend from delivery insights.
     2. Pulls attributed conversion counts from /conversions/insights.
     3. Computes conversion_rate, CPA, and ROAS on the server.
+
+    aggregation_level must be campaign, ad_group, or ad for the conversion API.
+    Pass ad_account as a shortcut for all campaigns with account totals in
+    `totals` (still queried at campaign grain).
 
     ROAS needs revenue. Pass average_order_value (major currency units) or
     conversion_value_by_entity. Without that, conversion_value and roas stay null.
 
     Dates are inclusive YYYY-MM-DD in the ad account timezone. Defaults to the
-    last 7 calendar days including today. Prefer aggregation_level=campaign.
+    last 7 calendar days including today.
 
     Ingest events with send_conversions; configure settings with manage_conversions.
     Empty conversions usually means no attributed events yet.
     """
     if level_err := _validate_option("aggregation_level", aggregation_level, _PERF_LEVELS):
         return level_err
+    api_level = _api_aggregation_level(aggregation_level)
+    if api_level not in _CONVERSION_LEVELS:
+        return _bad_request("aggregation_level must be campaign, ad_group, ad, or ad_account.")
     if average_order_value is not None and average_order_value < 0:
         return _bad_request("average_order_value must be >= 0.")
     value_map, value_err = _conversion_value_map(conversion_value_by_entity)
@@ -255,7 +271,6 @@ async def get_performance(
     try:
         account = await client.get("/ad_account")
         timezone_name = account.get("timezone") if isinstance(account, dict) else None
-        account_id = account.get("id") if isinstance(account, dict) else None
         tz = _resolve_timezone(timezone_name if isinstance(timezone_name, str) else None)
         if start is None or end is None:
             start, end = _default_window(tz)
@@ -269,32 +284,33 @@ async def get_performance(
 
         campaign_names: dict[str, str] = {}
         if not ids:
-            if aggregation_level == "ad_account":
-                if not isinstance(account_id, str) or not account_id:
-                    return _bad_request("Could not resolve ad account id from get_account.")
-                ids = [account_id]
-            else:
-                ids, campaign_names = await _list_campaign_ids(client)
-                if not ids:
-                    return _ok({
-                        "aggregation_level": aggregation_level,
-                        "start_date": start.isoformat(),
-                        "end_date": end.isoformat(),
-                        "timezone": str(tz),
-                        "rows": [],
-                        "totals": _efficiency_row(
-                            entity_id="totals",
-                            entity_name="totals",
-                            impressions=0,
-                            clicks=0,
-                            spend=0,
-                            conversions=0,
-                            conversion_value=None,
-                        ),
-                        "notes": ["No campaigns found. Create or activate campaigns before reading performance."],
-                    })
+            if api_level != "campaign":
+                return _bad_request(
+                    f"entity_ids are required when aggregation_level={aggregation_level}. "
+                    "Omit entity_ids only with campaign or ad_account (all campaigns)."
+                )
+            ids, campaign_names = await _list_campaign_ids(client)
+            if not ids:
+                return _ok({
+                    "aggregation_level": api_level,
+                    "requested_aggregation_level": aggregation_level,
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "timezone": str(tz),
+                    "rows": [],
+                    "totals": _efficiency_row(
+                        entity_id="totals",
+                        entity_name="totals",
+                        impressions=0,
+                        clicks=0,
+                        spend=0,
+                        conversions=0,
+                        conversion_value=None,
+                    ),
+                    "notes": ["No campaigns found. Create or activate campaigns before reading performance."],
+                })
 
-        entity = aggregation_level
+        entity = api_level
         delivery_fields = [
             f"{entity}.id",
             f"{entity}.name",
@@ -309,7 +325,7 @@ async def get_performance(
             "/ad_account/insights",
             params=_optional_params(
                 time_granularity="none",
-                aggregation_level=aggregation_level,
+                aggregation_level=api_level,
                 time_ranges=[json.dumps({"type": "unix_range", "start": start_unix, "end": end_unix}, separators=_COMPACT_SEPARATORS)],
                 fields=delivery_fields,
                 limit=min(max(len(ids), 20), 2000),
@@ -318,7 +334,7 @@ async def get_performance(
         conversions = await client.post(
             "/conversions/insights",
             json={
-                "aggregation_level": aggregation_level,
+                "aggregation_level": api_level,
                 "time_ranges": [f"{start.isoformat()}:{end.isoformat()}"],
                 "entity_ids": ids,
             },
@@ -409,9 +425,15 @@ async def get_performance(
         rows.sort(key=lambda item: item.get("spend") or 0, reverse=True)
         totals = _sum_rows(rows)
         notes = [
+            "This is ChatGPT Ads / OpenAI Ads reporting, not Google Ads.",
             "Delivery metrics come from /ad_account/insights; conversion counts come from /conversions/insights.",
             "CPA = spend / conversions. conversion_rate = conversions / clicks.",
         ]
+        if aggregation_level == "ad_account":
+            notes.append(
+                "aggregation_level=ad_account is rolled up from campaign rows because "
+                "/conversions/insights only accepts campaign, ad_group, or ad."
+            )
         if totals.get("conversion_value") is None:
             notes.append(
                 "ROAS is null because Ads conversion insights return counts only. "
@@ -424,7 +446,8 @@ async def get_performance(
             )
 
         payload = {
-            "aggregation_level": aggregation_level,
+            "aggregation_level": api_level,
+            "requested_aggregation_level": aggregation_level,
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
             "timezone": str(tz),

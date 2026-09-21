@@ -796,6 +796,42 @@ test("get_performance joins spend and conversions", async () => {
   assert.deepEqual(conversionCall.body.time_ranges, ["2026-09-14:2026-09-20"]);
 });
 
+test("get_performance maps ad_account to campaign grain", async () => {
+  mockClient.get = async (path, params) => {
+    mockClient.calls.push({ method: "get", path, params });
+    if (path === "/ad_account") return { id: "acct_1", timezone: "Europe/Paris" };
+    if (path === "/campaigns") return { data: [{ id: "camp_1", name: "Launch" }], has_more: false };
+    if (path === "/ad_account/insights") {
+      return {
+        data: [{
+          campaign: { id: "camp_1", name: "Launch", impressions: 10, clicks: 2, spend: 5 },
+        }],
+      };
+    }
+    return { ok: true, data: [] };
+  };
+  mockClient.post = async (path, body) => {
+    mockClient.calls.push({ method: "post", path, body });
+    if (path === "/conversions/insights") {
+      return { data: [{ entity_id: "camp_1", conversions: 1 }] };
+    }
+    return { ok: true };
+  };
+
+  const data = await callTool("get_performance", {
+    aggregation_level: "ad_account",
+    start_date: "2026-09-21",
+    end_date: "2026-09-21",
+  });
+  assert.equal(data.aggregation_level, "campaign");
+  assert.equal(data.requested_aggregation_level, "ad_account");
+  assert.equal(data.totals.conversions, 1);
+  const conversionCall = mockClient.calls.find((call) => call.path === "/conversions/insights");
+  assert.equal(conversionCall.body.aggregation_level, "campaign");
+  const deliveryCall = mockClient.calls.find((call) => call.path === "/ad_account/insights");
+  assert.equal(deliveryCall.params.aggregation_level, "campaign");
+});
+
 test("create_campaign defaults paused and applies budget guard", async () => {
   await callTool("create_campaign", { name: "Launch test", budget_usd: 25 });
   assert.deepEqual(mockClient.calls.at(-1), {
