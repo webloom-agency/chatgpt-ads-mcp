@@ -793,7 +793,12 @@ test("get_performance joins spend and conversions", async () => {
   assert.equal(data.totals.conversion_value, 200);
   assert.equal(data.totals.roas, 2);
   const conversionCall = mockClient.calls.find((call) => call.path === "/conversions/insights");
-  assert.deepEqual(conversionCall.body.time_ranges, ["2026-09-14:2026-09-20"]);
+  const encodedRange = JSON.parse(conversionCall.body.time_ranges[0]);
+  assert.equal(encodedRange.type, "unix_range");
+  assert.equal(typeof encodedRange.start, "number");
+  assert.equal(typeof encodedRange.end, "number");
+  const deliveryCall = mockClient.calls.find((call) => call.path === "/ad_account/insights");
+  assert.equal(deliveryCall.params.time_ranges[0], conversionCall.body.time_ranges[0]);
 });
 
 test("get_performance maps ad_account to campaign grain", async () => {
@@ -1133,9 +1138,22 @@ test("manage_conversions actions and send_conversions validation match Python", 
     path: "/conversions/insights",
     body: {
       aggregation_level: "campaign",
-      time_ranges: ["2026-06-01:2026-06-07"],
+      time_granularity: "none",
+      time_ranges: ['{"type":"date_range","since":"2026-06-01","until":"2026-06-07"}'],
       entity_ids: ["camp_1"],
     },
+  });
+  await callTool("manage_conversions", {
+    action: "get_insights",
+    aggregation_level: "ad_account",
+    time_ranges: [{ type: "unix_range", start: 1789336800, end: 1789941600 }],
+    entity_ids: ["camp_1"],
+  });
+  assert.equal(mockClient.calls.at(-1).body.aggregation_level, "campaign");
+  assert.deepEqual(JSON.parse(mockClient.calls.at(-1).body.time_ranges[0]), {
+    type: "unix_range",
+    start: 1789336800,
+    end: 1789941600,
   });
 
   mockClient.calls.length = 0;
@@ -1235,6 +1253,24 @@ test("error mapping returns soft failures and raises hard failures", () => {
   for (const status of [0, 401, 500, 503, 504]) {
     assert.throws(() => handleApiError(new OpenAIAdsAPIError(status, `boom ${status}`)), OpenAIAdsAPIError);
   }
+});
+
+test("client encodes Ads array query params with brackets", async () => {
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url));
+    assert.equal(parsed.searchParams.getAll("fields[]").join(","), "campaign.spend,campaign.clicks");
+    assert.equal(parsed.searchParams.getAll("fields").length, 0);
+    assert.equal(parsed.searchParams.getAll("time_ranges[]").length, 1);
+    return new Response(JSON.stringify({ data: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const client = new OpenAIAdsClient("test", "https://ads.test/v1");
+  await client.get("/ad_account/insights", {
+    fields: ["campaign.spend", "campaign.clicks"],
+    time_ranges: ['{"type":"unix_range","start":1,"end":2}'],
+  });
 });
 
 test("client maps 401 to a friendly API key error", async () => {

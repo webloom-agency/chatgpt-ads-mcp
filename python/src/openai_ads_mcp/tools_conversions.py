@@ -9,6 +9,7 @@ from ._core import *
 
 _ACTION_SOURCES = {"web", "mobile_app", "offline", "physical_store", "phone_call", "email", "other"}
 _CONVERSION_READ_ACTIONS = {"get_event_settings", "get_insights"}
+_CONVERSION_INSIGHT_LEVELS = {"campaign", "ad_group", "ad"}
 _SUPPORTED_EVENT_DATA_TYPES = {
     "app_installed": "customer_action",
     "app_opened": "customer_action",
@@ -47,6 +48,53 @@ def _source_ids_payload(source_ids: Any) -> tuple[list[str] | None, str | None]:
     return ids, None
 
 
+def _normalize_conversion_time_ranges(value: Any) -> tuple[list[str] | None, str | None]:
+    """Encode conversion insight windows as JSON object strings.
+
+    Official shape: time_ranges=["{\\"type\\":\\"unix_range\\",\\"start\\":...,\\"end\\":...}"]
+    Also accepts date_range objects and legacy "YYYY-MM-DD:YYYY-MM-DD" strings.
+    """
+    items, err = _coerce_list(value, "time_ranges")
+    if err:
+        return None, err
+    if not items:
+        return None, _bad_request("time_ranges must include at least one range.")
+    encoded: list[str] = []
+    for index, item in enumerate(items):
+        if isinstance(item, dict):
+            if item.get("type") not in {"unix_range", "hour_range", "date_range"}:
+                return None, _bad_request(
+                    f"time_ranges[{index}].type must be unix_range, hour_range, or date_range."
+                )
+            encoded.append(json.dumps(item, separators=_COMPACT_SEPARATORS))
+            continue
+        if not isinstance(item, str) or not item.strip():
+            return None, _bad_request(f"time_ranges[{index}] must be a JSON object string or object.")
+        text = item.strip()
+        if text.startswith("{"):
+            parsed, parse_err = _coerce_json(text, f"time_ranges[{index}]")
+            if parse_err:
+                return None, parse_err
+            if not isinstance(parsed, dict) or parsed.get("type") not in {"unix_range", "hour_range", "date_range"}:
+                return None, _bad_request(
+                    f"time_ranges[{index}] must be a unix_range, hour_range, or date_range JSON object."
+                )
+            encoded.append(json.dumps(parsed, separators=_COMPACT_SEPARATORS))
+            continue
+        legacy = re.fullmatch(r"(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})", text)
+        if legacy:
+            encoded.append(json.dumps(
+                {"type": "date_range", "since": legacy.group(1), "until": legacy.group(2)},
+                separators=_COMPACT_SEPARATORS,
+            ))
+            continue
+        return None, _bad_request(
+            f"time_ranges[{index}] must be a JSON-encoded unix_range/date_range/hour_range object "
+            '(example: {"type":"unix_range","start":1788235200,"end":1788840000}).'
+        )
+    return encoded, None
+
+
 @ads_tool(writes=True, open_world=True)
 @readonly_actions(*_CONVERSION_READ_ACTIONS)
 async def manage_conversions(
@@ -74,7 +122,10 @@ async def manage_conversions(
     - set_event_settings: POST /conversions/event_settings. Requires name,
       event_type, attribution_window_days, and source_ids.
     - get_insights: POST /conversions/insights. Requires aggregation_level,
-      time_ranges, and entity_ids.
+      time_ranges, and entity_ids. time_ranges must be JSON-encoded objects such as
+      {"type":"unix_range","start":1788235200,"end":1788840000} or
+      {"type":"date_range","since":"2026-09-14","until":"2026-09-20"}.
+      Legacy "YYYY-MM-DD:YYYY-MM-DD" strings are rewritten to date_range.
     """
     if is_readonly_mode() and action not in _CONVERSION_READ_ACTIONS:
         return _bad_request(
@@ -128,7 +179,14 @@ async def manage_conversions(
         if action == "get_insights":
             if level_err := _validate_non_empty("aggregation_level", aggregation_level, minimum=1, maximum=100):
                 return level_err
-            ranges, ranges_err = _coerce_string_list(time_ranges, "time_ranges")
+            raw_level = aggregation_level.strip() if isinstance(aggregation_level, str) else ""
+            api_level = "campaign" if raw_level == "ad_account" else raw_level
+            if api_level not in _CONVERSION_INSIGHT_LEVELS:
+                return _bad_request(
+                    "aggregation_level must be campaign, ad_group, or ad "
+                    "(ad_account is remapped to campaign)."
+                )
+            ranges, ranges_err = _normalize_conversion_time_ranges(time_ranges)
             if ranges_err:
                 return ranges_err
             ids, ids_err = _coerce_string_list(entity_ids, "entity_ids")
@@ -138,7 +196,12 @@ async def manage_conversions(
                 return _bad_request("time_ranges and entity_ids are required for get_insights.")
             return _ok(await client.post(
                 "/conversions/insights",
-                json={"aggregation_level": aggregation_level, "time_ranges": ranges, "entity_ids": ids},
+                json={
+                    "aggregation_level": api_level,
+                    "time_granularity": "none",
+                    "time_ranges": ranges,
+                    "entity_ids": ids,
+                },
             ))
         return _bad_request(f"Unknown action: {action}")
     except OpenAIAdsAPIError as e:

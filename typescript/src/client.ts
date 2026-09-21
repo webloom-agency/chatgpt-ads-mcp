@@ -188,9 +188,11 @@ function buildUrl(baseUrl: string, path: string, params?: JsonRecord): string {
       continue;
     }
     if (Array.isArray(value)) {
+      // Ads query arrays must use PHP-style brackets: fields[]=a&fields[]=b
+      const bracketKey = key.endsWith("[]") ? key : `${key}[]`;
       for (const item of value) {
         if (item !== undefined && item !== null) {
-          url.searchParams.append(key, String(item));
+          url.searchParams.append(bracketKey, String(item));
         }
       }
     } else {

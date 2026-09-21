@@ -524,10 +524,14 @@ class TestPerformance:
         assert data["totals"]["conversion_value"] == 200
         assert data["totals"]["roas"] == 2
         assert mock_client.post.call_args.args[0] == "/conversions/insights"
-        assert mock_client.post.call_args.kwargs["json"]["time_ranges"] == ["2026-09-14:2026-09-20"]
+        encoded_range = mock_client.post.call_args.kwargs["json"]["time_ranges"][0]
+        assert json.loads(encoded_range)["type"] == "unix_range"
+        assert "start" in json.loads(encoded_range)
+        assert "end" in json.loads(encoded_range)
         delivery_params = mock_client.get.call_args_list[1].kwargs["params"]
         assert delivery_params["aggregation_level"] == "campaign"
         assert "campaign.spend" in delivery_params["fields"]
+        assert delivery_params["time_ranges"][0] == encoded_range
 
     @pytest.mark.asyncio
     async def test_get_performance_maps_ad_account_to_campaign(self, mock_client):
@@ -910,10 +914,20 @@ class TestConversions:
             "/conversions/insights",
             json={
                 "aggregation_level": "campaign",
-                "time_ranges": ["2026-06-01:2026-06-07"],
+                "time_granularity": "none",
+                "time_ranges": ['{"type":"date_range","since":"2026-06-01","until":"2026-06-07"}'],
                 "entity_ids": ["camp_1"],
             },
         )
+
+        mock_client.post.reset_mock()
+        await manage_conversions(
+            action="get_insights",
+            aggregation_level="ad_account",
+            time_ranges=[{"type": "unix_range", "start": 1789336800, "end": 1789941600}],
+            entity_ids=["camp_1"],
+        )
+        assert mock_client.post.call_args.kwargs["json"]["aggregation_level"] == "campaign"
 
     @pytest.mark.asyncio
     async def test_send_conversions_rejects_too_many(self, mock_client):

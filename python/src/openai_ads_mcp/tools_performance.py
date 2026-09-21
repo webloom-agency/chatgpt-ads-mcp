@@ -321,12 +321,16 @@ async def get_performance(
             f"{entity}.cpc",
             f"{entity}.cpm",
         ]
+        delivery_range = json.dumps(
+            {"type": "unix_range", "start": start_unix, "end": end_unix},
+            separators=_COMPACT_SEPARATORS,
+        )
         delivery = await client.get(
             "/ad_account/insights",
             params=_optional_params(
                 time_granularity="none",
                 aggregation_level=api_level,
-                time_ranges=[json.dumps({"type": "unix_range", "start": start_unix, "end": end_unix}, separators=_COMPACT_SEPARATORS)],
+                time_ranges=[delivery_range],
                 fields=delivery_fields,
                 limit=min(max(len(ids), 20), 2000),
             ),
@@ -335,7 +339,8 @@ async def get_performance(
             "/conversions/insights",
             json={
                 "aggregation_level": api_level,
-                "time_ranges": [f"{start.isoformat()}:{end.isoformat()}"],
+                "time_granularity": "none",
+                "time_ranges": [delivery_range],
                 "entity_ids": ids,
             },
         )

@@ -194,10 +194,33 @@ function insightsPath(scope: string, entityId: unknown): [string | null, string 
   return [null, badRequest("scope must be account, campaign, ad_group, or ad.")];
 }
 
+function alignUnixHour(value: number, roundUp = false): number {
+  if (value % 3600 === 0) return value;
+  const floored = value - (value % 3600);
+  return roundUp ? floored + 3600 : floored;
+}
+
 function normalizeTimeRange(value: JsonRecord): [JsonRecord | null, string | null] {
   if (typeof value.type === "string") {
     if (!TIME_RANGE_TYPES.has(value.type)) {
       return [null, badRequest("time_range.type must be unix_range, hour_range, or date_range.")];
+    }
+    if (value.type === "unix_range") {
+      if (typeof value.start !== "number" || typeof value.end !== "number") {
+        return [null, badRequest("unix_range requires integer start and end (Unix seconds).")];
+      }
+      const start = alignUnixHour(value.start, false);
+      const end = alignUnixHour(value.end, true);
+      if (end <= start) {
+        return [null, badRequest(
+          "unix_range end must be after start after hour alignment. Prefer omitting time_range or use full-hour timestamps.",
+        )];
+      }
+      const now = Math.floor(Date.now() / 1000);
+      if (start > now + 3600) {
+        return [null, badRequest("unix_range start is in the future.")];
+      }
+      return [{ type: "unix_range", start, end }, null];
     }
     return [value, null];
   }
@@ -207,7 +230,7 @@ function normalizeTimeRange(value: JsonRecord): [JsonRecord | null, string | nul
     return [null, badRequest("time_range must include type: unix_range, hour_range, or date_range.")];
   }
   const type = legacyKeys[0];
-  return [{ type, ...(value[type] as JsonRecord) }, null];
+  return normalizeTimeRange({ type, ...(value[type] as JsonRecord) });
 }
 
 function oneTimeRange(value: unknown): [string[] | null, string | null] {

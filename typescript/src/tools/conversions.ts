@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 
 import {
   badRequest,
+  coerceJson,
   coerceList,
   coerceStringList,
   conversionTimeBoundsMs,
@@ -21,6 +22,7 @@ import {
 
 const ACTION_SOURCES = new Set(["web", "mobile_app", "offline", "physical_store", "phone_call", "email", "other"]);
 const CONVERSION_READ_ACTIONS = new Set(["get_event_settings", "get_insights"]);
+const CONVERSION_INSIGHT_LEVELS = new Set(["campaign", "ad_group", "ad"]);
 const SUPPORTED_EVENT_DATA_TYPES: Record<string, string> = {
   app_installed: "customer_action",
   app_opened: "customer_action",
@@ -54,6 +56,45 @@ function sourceIdsPayload(sourceIds: unknown): [string[] | null, string | null] 
   if (error) return [null, error];
   if (!ids?.length) return [null, badRequest("source_ids must include at least one id.")];
   return [ids, null];
+}
+
+function normalizeConversionTimeRanges(value: unknown): [string[] | null, string | null] {
+  const [items, error] = coerceList(value, "time_ranges");
+  if (error) return [null, error];
+  if (!items?.length) return [null, badRequest("time_ranges must include at least one range.")];
+  const encoded: string[] = [];
+  for (const [index, item] of items.entries()) {
+    if (isRecord(item)) {
+      if (!["unix_range", "hour_range", "date_range"].includes(String(item.type))) {
+        return [null, badRequest(`time_ranges[${index}].type must be unix_range, hour_range, or date_range.`)];
+      }
+      encoded.push(JSON.stringify(item));
+      continue;
+    }
+    if (typeof item !== "string" || !item.trim()) {
+      return [null, badRequest(`time_ranges[${index}] must be a JSON object string or object.`)];
+    }
+    const text = item.trim();
+    if (text.startsWith("{")) {
+      const [parsed, parseError] = coerceJson(text, `time_ranges[${index}]`);
+      if (parseError) return [null, parseError];
+      if (!isRecord(parsed) || !["unix_range", "hour_range", "date_range"].includes(String(parsed.type))) {
+        return [null, badRequest(`time_ranges[${index}] must be a unix_range, hour_range, or date_range JSON object.`)];
+      }
+      encoded.push(JSON.stringify(parsed));
+      continue;
+    }
+    const legacy = text.match(/^(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
+    if (legacy) {
+      encoded.push(JSON.stringify({ type: "date_range", since: legacy[1], until: legacy[2] }));
+      continue;
+    }
+    return [null, badRequest(
+      `time_ranges[${index}] must be a JSON-encoded unix_range/date_range/hour_range object ` +
+      '(example: {"type":"unix_range","start":1788235200,"end":1788840000}).',
+    )];
+  }
+  return [encoded, null];
 }
 
 async function manageConversions(args: ToolArgs): Promise<string> {
@@ -118,7 +159,12 @@ async function manageConversions(args: ToolArgs): Promise<string> {
     if (args.action === "get_insights") {
       const levelError = validateNonEmpty("aggregation_level", args.aggregation_level, 1, 100);
       if (levelError) return levelError;
-      const [timeRanges, timeRangesError] = coerceStringList(args.time_ranges, "time_ranges");
+      const rawLevel = String(args.aggregation_level).trim();
+      const apiLevel = rawLevel === "ad_account" ? "campaign" : rawLevel;
+      if (!CONVERSION_INSIGHT_LEVELS.has(apiLevel)) {
+        return badRequest("aggregation_level must be campaign, ad_group, or ad (ad_account is remapped to campaign).");
+      }
+      const [timeRanges, timeRangesError] = normalizeConversionTimeRanges(args.time_ranges);
       if (timeRangesError) return timeRangesError;
       const [entityIds, entityIdsError] = coerceStringList(args.entity_ids, "entity_ids");
       if (entityIdsError) return entityIdsError;
@@ -126,7 +172,8 @@ async function manageConversions(args: ToolArgs): Promise<string> {
         return badRequest("time_ranges and entity_ids are required for get_insights.");
       }
       return ok(await client!.post("/conversions/insights", {
-        aggregation_level: args.aggregation_level,
+        aggregation_level: apiLevel,
+        time_granularity: "none",
         time_ranges: timeRanges,
         entity_ids: entityIds,
       }));
@@ -309,7 +356,7 @@ async function sendConversions(args: ToolArgs): Promise<string> {
 export const conversionTools: AdsToolDefinition[] = [
   {
     name: "manage_conversions",
-    description: "Manage conversion pixels, API keys, event settings, and conversion reporting.",
+    description: "Manage conversion pixels, API keys, event settings, and conversion reporting. For get_insights, time_ranges must be JSON-encoded unix_range/date_range objects (legacy YYYY-MM-DD:YYYY-MM-DD strings are rewritten).",
     inputSchema: {
       action: z.enum(["create_pixel", "create_api_key", "get_event_settings", "set_event_settings", "get_insights"]),
       name: z.string().optional(),

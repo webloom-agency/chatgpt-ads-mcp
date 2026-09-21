@@ -306,16 +306,18 @@ async function getPerformance(args: ToolArgs): Promise<string> {
       `${entity}.cpc`,
       `${entity}.cpm`,
     ];
+    const timeRange = JSON.stringify({ type: "unix_range", start: startUnix, end: endUnix });
     const delivery = await client!.get("/ad_account/insights", optionalParams({
       time_granularity: "none",
       aggregation_level: apiLevel,
-      time_ranges: [JSON.stringify({ type: "unix_range", start: startUnix, end: endUnix })],
+      time_ranges: [timeRange],
       fields: deliveryFields,
       limit: Math.min(Math.max(ids.length, 20), 2000),
     }));
     const conversions = await client!.post("/conversions/insights", {
       aggregation_level: apiLevel,
-      time_ranges: [`${start}:${end}`],
+      time_granularity: "none",
+      time_ranges: [timeRange],
       entity_ids: ids,
     });
 
