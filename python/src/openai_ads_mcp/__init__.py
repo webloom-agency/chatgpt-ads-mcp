@@ -18,6 +18,7 @@ from .tools_campaigns import *
 from .tools_adgroups import *
 from .tools_ads import *
 from .tools_insights import *
+from .tools_performance import *
 from .tools_audiences import *
 from .tools_conversions import *
 from .helpers import *

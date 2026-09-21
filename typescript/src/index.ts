@@ -15,6 +15,7 @@ import { audienceTools } from "./tools/audiences.js";
 import { campaignTools } from "./tools/campaigns.js";
 import { conversionTools } from "./tools/conversions.js";
 import { insightTools } from "./tools/insights.js";
+import { performanceTools } from "./tools/performance.js";
 
 export const allToolDefinitions: AdsToolDefinition[] = [
   ...accountTools,
@@ -22,6 +23,7 @@ export const allToolDefinitions: AdsToolDefinition[] = [
   ...adGroupTools,
   ...adTools,
   ...insightTools,
+  ...performanceTools,
   ...audienceTools,
   ...conversionTools,
   ...helperTools,

@@ -130,11 +130,14 @@ mcp = FastMCP(
         "set OPENAI_ADS_MCP_ALLOW_WRITES=1 (or OPENAI_ADS_MCP_READONLY=0) and restart. "
         "In readonly mode conversion read actions remain available.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
-        "Stats workflow: get_account → list_campaigns → get_insights. "
+        "Stats workflow: get_account → list_campaigns → get_insights for delivery, "
+        "or get_performance to join spend with attributed conversions and compute "
+        "CPA / conversion_rate / ROAS. "
         "This is ChatGPT Ads / OpenAI Ads. Insight fields are dotted names such as "
         "campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, "
         "campaign.cpc, and campaign.cpm. get_insights does not return conversions, "
-        "conversion_rate, conversion_value, or roas."
+        "conversion_rate, conversion_value, or roas; use get_performance or "
+        "manage_conversions for those."
     ),
     lifespan=_lifespan,
     transport_security=_transport_security,

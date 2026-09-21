@@ -18,6 +18,7 @@
     { "name": "update_ad", "group": "Ads" },
     { "name": "set_ad_state", "group": "Ads" },
     { "name": "get_insights", "group": "Insights" },
+    { "name": "get_performance", "group": "Insights" },
     { "name": "list_audiences", "group": "Audiences" },
     { "name": "get_audience", "group": "Audiences" },
     { "name": "search_geo", "group": "Audiences" },

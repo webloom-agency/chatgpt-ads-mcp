@@ -18,7 +18,7 @@ Secrets stay in environment variables only — never as tool arguments.
 | --- | --- |
 | Confirm the API key / account | `get_account` |
 | List campaigns, ad groups, ads | `list_campaigns`, `list_ad_groups`, `list_ads` |
-| Performance stats | `get_insights` (account / campaign / ad group / ad) |
+| Performance stats | `get_insights` (delivery) · `get_performance` (spend + conversions → CPA / ROAS) |
 | Audiences & geo | `list_audiences`, `search_geo`, … |
 | Conversions (read) | `manage_conversions` (`get_event_settings`, …) |
 

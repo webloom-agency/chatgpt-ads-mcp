@@ -43,6 +43,7 @@ const expectedArgMap = new Map(Object.entries({
   get_audience: ["audience_id"],
   get_campaign: ["campaign_id"],
   get_insights: ["scope", "entity_id", "time_granularity", "aggregation_level", "time_range", "segments", "override_segment_group_order", "includes", "fields", "filters", "sort", "limit", "after", "before", "response_format"],
+  get_performance: ["aggregation_level", "start_date", "end_date", "entity_ids", "average_order_value", "conversion_value_by_entity", "response_format"],
   list_ad_groups: ["campaign_id", "limit", "after", "before", "order"],
   list_ads: ["ad_group_id", "limit", "after", "before", "order"],
   list_audiences: ["limit", "after", "before", "order"],
@@ -107,6 +108,7 @@ const expectedOpenWorldTools = new Set([
   "update_ad",
   "set_ad_state",
   "get_insights",
+  "get_performance",
   "list_audiences",
   "get_audience",
   "search_geo",
@@ -267,7 +269,7 @@ afterEach(() => {
 
 test("tool names match the shared manifest and Python arg names", () => {
   assert.deepEqual(allToolDefinitions.map((definition) => definition.name), expectedNames);
-  assert.equal(allToolDefinitions.length, 27);
+  assert.equal(allToolDefinitions.length, 28);
   const actualArgMap = new Map(allToolDefinitions.map((definition) => [definition.name, definition.argNames]));
   assert.deepEqual([...actualArgMap.entries()].sort(), [...expectedArgMap.entries()].sort());
   assert.deepEqual(registeredToolMetadata().map((item) => item.name), expectedNames);
@@ -755,6 +757,43 @@ test("get_insights maps shorthand metrics and rejects unknown ones", async () =>
     "ad_account.clicks",
     "ad_account.spend",
   ]);
+});
+
+test("get_performance joins spend and conversions", async () => {
+  mockClient.get = async (path, params) => {
+    mockClient.calls.push({ method: "get", path, params });
+    if (path === "/ad_account") return { id: "acct_1", timezone: "Europe/Paris" };
+    if (path === "/ad_account/insights") {
+      return {
+        data: [{
+          campaign: { id: "camp_1", name: "Brand", impressions: 1000, clicks: 50, spend: 100 },
+        }],
+      };
+    }
+    return { ok: true, data: [] };
+  };
+  mockClient.post = async (path, body) => {
+    mockClient.calls.push({ method: "post", path, body });
+    if (path === "/conversions/insights") {
+      return { data: [{ entity_id: "camp_1", conversions: 5 }] };
+    }
+    return { ok: true };
+  };
+
+  const data = await callTool("get_performance", {
+    start_date: "2026-09-14",
+    end_date: "2026-09-20",
+    entity_ids: ["camp_1"],
+    average_order_value: 40,
+  });
+  assert.equal(data.totals.spend, 100);
+  assert.equal(data.totals.conversions, 5);
+  assert.equal(data.totals.cpa, 20);
+  assert.equal(data.totals.conversion_rate, 0.1);
+  assert.equal(data.totals.conversion_value, 200);
+  assert.equal(data.totals.roas, 2);
+  const conversionCall = mockClient.calls.find((call) => call.path === "/conversions/insights");
+  assert.deepEqual(conversionCall.body.time_ranges, ["2026-09-14:2026-09-20"]);
 });
 
 test("create_campaign defaults paused and applies budget guard", async () => {

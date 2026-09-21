@@ -78,6 +78,7 @@ EXPECTED_OPEN_WORLD_TOOLS = {
     "update_ad",
     "set_ad_state",
     "get_insights",
+    "get_performance",
     "list_audiences",
     "get_audience",
     "search_geo",
@@ -148,7 +149,7 @@ class TestToolRegistration:
         assert registered == expected
 
     def test_tool_count_is_curated(self):
-        assert len(self._tools()) == 27
+        assert len(self._tools()) == 28
 
     def test_all_tools_have_descriptions_and_annotations(self):
         for name, tool in self._tools().items():
@@ -490,6 +491,50 @@ class TestInsights:
 
         data = _tool_data(await get_insights(scope="campaign"))
         assert data["error"] is True
+        mock_client.get.assert_not_called()
+
+
+class TestPerformance:
+    @pytest.mark.asyncio
+    async def test_get_performance_joins_spend_and_conversions(self, mock_client):
+        from openai_ads_mcp.tools_performance import get_performance
+
+        mock_client.get = AsyncMock(side_effect=[
+            {"id": "acct_1", "timezone": "Europe/Paris"},
+            {
+                "data": [{
+                    "campaign": {"id": "camp_1", "name": "Brand", "impressions": 1000, "clicks": 50, "spend": 100},
+                }],
+            },
+        ])
+        mock_client.post = AsyncMock(return_value={
+            "data": [{"entity_id": "camp_1", "conversions": 5}],
+        })
+
+        data = _tool_data(await get_performance(
+            start_date="2026-09-14",
+            end_date="2026-09-20",
+            entity_ids=["camp_1"],
+            average_order_value=40,
+        ))
+        assert data["totals"]["spend"] == 100
+        assert data["totals"]["conversions"] == 5
+        assert data["totals"]["cpa"] == 20
+        assert data["totals"]["conversion_rate"] == 0.1
+        assert data["totals"]["conversion_value"] == 200
+        assert data["totals"]["roas"] == 2
+        assert mock_client.post.call_args.args[0] == "/conversions/insights"
+        assert mock_client.post.call_args.kwargs["json"]["time_ranges"] == ["2026-09-14:2026-09-20"]
+        delivery_params = mock_client.get.call_args_list[1].kwargs["params"]
+        assert delivery_params["aggregation_level"] == "campaign"
+        assert "campaign.spend" in delivery_params["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_performance_requires_paired_dates(self, mock_client):
+        from openai_ads_mcp.tools_performance import get_performance
+
+        result = await get_performance(start_date="2026-09-14")
+        assert result.isError is True
         mock_client.get.assert_not_called()
 
 

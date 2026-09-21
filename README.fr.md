@@ -18,7 +18,7 @@ Les secrets restent dans des variables d’environnement — jamais en argument 
 | --- | --- |
 | Vérifier la clé / le compte | `get_account` |
 | Lister campagnes, ad groups, ads | `list_campaigns`, `list_ad_groups`, `list_ads` |
-| Performances | `get_insights` (compte / campagne / ad group / ad) |
+| Performances | `get_insights` (diffusion) · `get_performance` (dépenses + conversions → CPA / ROAS) |
 | Audiences & geo | `list_audiences`, `search_geo`, … |
 | Conversions (lecture) | `manage_conversions` (`get_event_settings`, …) |
 
