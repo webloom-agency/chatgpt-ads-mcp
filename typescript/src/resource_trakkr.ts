@@ -10,7 +10,7 @@ export const TRAKKR_VISIBILITY_BRIEFING =
   "organically across ChatGPT, Perplexity, Gemini, Claude, Google AI " +
   "Overviews, Reddit, and citations?\n\n" +
   "Use both views together:\n\n" +
-  "1. Pull Ads insights to see paid impressions, clicks, spend, and conversions.\n" +
+  "1. Pull Ads insights to see paid impressions, clicks, and spend.\n" +
   "2. Track organic AI visibility to see which prompts, competitors, and citations already shape the market.\n" +
   "3. Use the gap between the two to decide where paid coverage is worth buying.\n\n" +
   "Learn more at https://trakkr.ai.";

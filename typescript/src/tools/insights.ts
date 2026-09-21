@@ -30,6 +30,113 @@ const INSIGHT_AGGREGATION_LEVELS: Record<string, Set<string>> = {
 const SEGMENT_GROUP_ORDER_VALUES = new Set(["ad_account", "campaign", "ad_group", "ad", "product", "country", "device"]);
 const INCLUDES = new Set(["zero_impression_items", "zero_impression_products"]);
 const TIME_RANGE_TYPES = new Set(["unix_range", "hour_range", "date_range"]);
+const INSIGHT_METRICS = ["impressions", "clicks", "spend", "ctr", "cpc", "cpm"];
+const INSIGHT_METRIC_ENTITIES = ["ad_account", "campaign", "ad_group", "ad", "product", "country", "device"];
+const INSIGHT_FIELDS = new Set([
+  ...INSIGHT_METRIC_ENTITIES.flatMap((entity) => INSIGHT_METRICS.map((metric) => `${entity}.${metric}`)),
+  "ad_account.id",
+  "ad_account.name",
+  "ad_account.url",
+  "ad_account.budget.daily",
+  "ad_account.budget.lifetime",
+  "campaign.id",
+  "campaign.name",
+  "campaign.description",
+  "campaign.status",
+  "campaign.start_time",
+  "campaign.end_time",
+  "campaign.budget.daily",
+  "campaign.budget.lifetime",
+  "ad_group.id",
+  "ad_group.name",
+  "ad_group.description",
+  "ad_group.status",
+  "ad.id",
+  "ad.name",
+  "ad.title",
+  "ad.copy",
+  "ad.link",
+  "ad.status",
+  "ad.review_status",
+  "product.feed_id",
+  "product.item_id",
+  "product.title",
+  "product.description",
+  "product.body",
+  "product.target_url",
+  "product.image_url",
+  "product.brand",
+  "product.seller_name",
+  "product.price",
+  "product.availability",
+  "country.name",
+  "device.type",
+  "metadata.readable_time",
+  "metadata.timezone",
+]);
+const SNAKE_FIELD_PREFIXES = ["ad_account", "ad_group", "campaign", "product", "country", "device", "metadata", "ad"];
+const FIELD_ENTITY_BY_SCOPE: Record<string, string> = {
+  account: "campaign",
+  campaign: "campaign",
+  ad_group: "ad_group",
+  ad: "ad",
+};
+
+function fieldEntity(scope: string, aggregationLevel: string | undefined): string {
+  return aggregationLevel ?? FIELD_ENTITY_BY_SCOPE[scope];
+}
+
+function defaultInsightFields(entity: string): string[] {
+  return [
+    `${entity}.id`,
+    `${entity}.name`,
+    ...INSIGHT_METRICS.map((metric) => `${entity}.${metric}`),
+    "metadata.readable_time",
+    "metadata.timezone",
+  ].filter((field) => INSIGHT_FIELDS.has(field));
+}
+
+function canonicalInsightField(field: string, entity: string): string | null {
+  if (INSIGHT_FIELDS.has(field)) return field;
+  if (INSIGHT_METRICS.includes(field)) {
+    const candidate = `${entity}.${field}`;
+    return INSIGHT_FIELDS.has(candidate) ? candidate : null;
+  }
+  if (field === "readable_time" || field === "timezone") return `metadata.${field}`;
+  if (field === "item_id") return "product.item_id";
+  if (field === "feed_id") return "product.feed_id";
+  for (const prefix of SNAKE_FIELD_PREFIXES) {
+    const head = `${prefix}_`;
+    if (field.startsWith(head)) {
+      const rest = field.slice(head.length).replace("budget_daily", "budget.daily").replace("budget_lifetime", "budget.lifetime");
+      const candidate = `${prefix}.${rest}`;
+      return INSIGHT_FIELDS.has(candidate) ? candidate : null;
+    }
+  }
+  return null;
+}
+
+function normalizeInsightFields(fields: string[], entity: string): [string[] | null, string | null] {
+  const canonical: string[] = [];
+  const unknown: string[] = [];
+  for (const field of fields) {
+    const mapped = canonicalInsightField(field, entity);
+    if (!mapped) unknown.push(field);
+    else if (!canonical.includes(mapped)) canonical.push(mapped);
+  }
+  if (unknown.length) {
+    return [null, badRequest(
+      "Unknown ChatGPT Ads insight fields: " +
+      unknown.join(", ") +
+      ". Use dotted fields such as campaign.id, campaign.name, campaign.impressions, " +
+      "campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, " +
+      "metadata.readable_time, and metadata.timezone. Shorthand impressions, clicks, spend, " +
+      "ctr, cpc, and cpm are rewritten using the aggregation entity. " +
+      "get_insights does not return conversions, conversion_rate, conversion_value, or roas.",
+    )];
+  }
+  return [canonical, null];
+}
 
 function insightsPath(scope: string, entityId: unknown): [string | null, string | null] {
   if (scope === "account") return ["/ad_account/insights", null];
@@ -133,7 +240,16 @@ async function getInsights(args: ToolArgs): Promise<string> {
   }
   const [fields, fieldsError] = coerceStringList(args.fields, "fields");
   if (fieldsError) return fieldsError;
-  if (segments?.[0] === "product" && !(fields?.includes("product.feed_id") || fields?.includes("product.item_id"))) {
+  const entity = fieldEntity(scope, aggregationLevel);
+  let normalizedFields = fields;
+  if (!normalizedFields) {
+    normalizedFields = defaultInsightFields(entity);
+  } else {
+    const [mapped, normalizeError] = normalizeInsightFields(normalizedFields, entity);
+    if (normalizeError || !mapped) return normalizeError ?? badRequest("fields could not be normalized.");
+    normalizedFields = mapped;
+  }
+  if (segments?.[0] === "product" && !(normalizedFields?.includes("product.feed_id") || normalizedFields?.includes("product.item_id"))) {
     return badRequest("product segments require fields to include product.feed_id or product.item_id.");
   }
   const [overrideSegmentGroupOrder, overrideError] = coerceStringList(args.override_segment_group_order, "override_segment_group_order");
@@ -180,7 +296,7 @@ async function getInsights(args: ToolArgs): Promise<string> {
         segments,
         override_segment_group_order: overrideSegmentGroupOrder,
         includes,
-        fields,
+        fields: normalizedFields,
         filters,
         sort,
         limit,
@@ -199,7 +315,7 @@ export const insightTools: AdsToolDefinition[] = [
   {
     name: "get_insights",
     description:
-      "Get performance insights for account, campaign, ad group, or ad scope. Supports fields, filters, sort, product/country/device segments, time ranges, and cursor pagination.",
+      "Get ChatGPT Ads performance insights for an account, campaign, ad group, or ad. This is OpenAI Ads, not Google Ads. Use dotted fields such as campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, campaign.id, campaign.name, and metadata.readable_time. Shorthand impressions, clicks, spend, ctr, cpc, and cpm are rewritten to the aggregation entity. conversions, conversion_rate, conversion_value, and roas are not insight fields. Omitting fields uses the aggregation entity's id, name, and core metrics.",
     inputSchema: {
       scope: z.enum(["account", "campaign", "ad_group", "ad"]),
       entity_id: z.string().optional(),

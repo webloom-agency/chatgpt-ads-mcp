@@ -14,7 +14,7 @@ from typing import Any, Callable, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from .client import API_BASE_URL, OpenAIAdsAPIError, OpenAIAdsClient
 
@@ -130,8 +130,11 @@ mcp = FastMCP(
         "set OPENAI_ADS_MCP_ALLOW_WRITES=1 (or OPENAI_ADS_MCP_READONLY=0) and restart. "
         "In readonly mode conversion read actions remain available.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
-        "Stats workflow: get_account → list_campaigns → get_insights "
-        "(impressions, clicks, spend, ctr, cpc, cpm)."
+        "Stats workflow: get_account → list_campaigns → get_insights. "
+        "This is ChatGPT Ads / OpenAI Ads. Insight fields are dotted names such as "
+        "campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, "
+        "campaign.cpc, and campaign.cpm. get_insights does not return conversions, "
+        "conversion_rate, conversion_value, or roas."
     ),
     lifespan=_lifespan,
     transport_security=_transport_security,
@@ -164,7 +167,7 @@ async def trakkr_visibility_resource() -> str:
         "organically across ChatGPT, Perplexity, Gemini, Claude, Google AI "
         "Overviews, Reddit, and citations?\n\n"
         "Use both views together:\n\n"
-        "1. Pull Ads insights to see paid impressions, clicks, spend, and conversions.\n"
+        "1. Pull Ads insights to see paid impressions, clicks, and spend.\n"
         "2. Track organic AI visibility to see which prompts, competitors, and citations already shape the market.\n"
         "3. Use the gap between the two to decide where paid coverage is worth buying.\n\n"
         "Learn more at https://trakkr.ai."
@@ -311,6 +314,25 @@ def _bad_request(message: str) -> str:
     return json.dumps({"error": True, "message": message}, separators=_COMPACT_SEPARATORS)
 
 
+def _as_mcp_result(payload: Any) -> Any:
+    """Turn an error JSON payload into an MCP tool error.
+
+    Clients otherwise see isError=false and may treat a rejected query as empty performance.
+    """
+    if not isinstance(payload, str):
+        return payload
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return payload
+    if isinstance(parsed, dict) and parsed.get("error") is True:
+        return CallToolResult(
+            content=[TextContent(type="text", text=payload)],
+            isError=True,
+        )
+    return payload
+
+
 def ads_tool(
     *,
     writes: bool = False,
@@ -339,7 +361,7 @@ def ads_tool(
 
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
-            return await fn(*args, **kwargs)
+            return _as_mcp_result(await fn(*args, **kwargs))
 
         wrapper.__signature__ = signature
         wrapper.__annotations__ = dict(getattr(fn, "__annotations__", {}))

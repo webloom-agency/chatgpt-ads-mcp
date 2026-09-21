@@ -703,6 +703,47 @@ test("get_insights covers all four scopes", async () => {
   });
 });
 
+test("get_insights maps shorthand metrics and rejects unknown ones", async () => {
+  await callTool("get_insights", {
+    scope: "account",
+    fields: ["impressions", "clicks", "spend", "ctr", "cpc", "cpm", "campaign_id"],
+  });
+  assert.deepEqual(mockClient.calls.at(-1).params.fields, [
+    "campaign.impressions",
+    "campaign.clicks",
+    "campaign.spend",
+    "campaign.ctr",
+    "campaign.cpc",
+    "campaign.cpm",
+    "campaign.id",
+  ]);
+
+  mockClient.calls.length = 0;
+  const rejected = await callTool("get_insights", {
+    scope: "account",
+    fields: ["roas", "conversions", "conversion_value"],
+  });
+  assert.equal(rejected.error, true);
+  assert.match(rejected.message, /roas/);
+  assert.match(rejected.message, /campaign\.impressions/);
+  assert.equal(mockClient.calls.length, 0);
+
+  await callTool("get_insights", { scope: "account" });
+  assert.deepEqual(mockClient.calls.at(-1).params.fields, [
+    "campaign.id",
+    "campaign.name",
+    "campaign.impressions",
+    "campaign.clicks",
+    "campaign.spend",
+    "campaign.ctr",
+    "campaign.cpc",
+    "campaign.cpm",
+    "metadata.readable_time",
+    "metadata.timezone",
+  ]);
+  assert.equal(mockClient.calls.at(-1).params.aggregation_level, undefined);
+});
+
 test("create_campaign defaults paused and applies budget guard", async () => {
   await callTool("create_campaign", { name: "Launch test", budget_usd: 25 });
   assert.deepEqual(mockClient.calls.at(-1), {

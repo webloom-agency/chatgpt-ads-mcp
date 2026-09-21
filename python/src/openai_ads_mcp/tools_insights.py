@@ -20,32 +20,59 @@ _SEGMENT_GROUP_ORDER_VALUES = {"ad_account", "campaign", "ad_group", "ad", "prod
 _INCLUDES = {"zero_impression_items", "zero_impression_products"}
 _TIME_RANGE_TYPES = {"unix_range", "hour_range", "date_range"}
 
-# Without fields[], Ads only returns id/start/end — metrics stay empty for clients.
-_DEFAULT_INSIGHT_FIELDS = [
-    "impressions",
-    "clicks",
-    "spend",
-    "ctr",
-    "cpc",
-    "cpm",
-    "conversions",
+# The Ads API rejects bare metric names. fields[] must use these dotted keys.
+_INSIGHT_METRICS = ("impressions", "clicks", "spend", "ctr", "cpc", "cpm")
+_INSIGHT_METRIC_ENTITIES = ("ad_account", "campaign", "ad_group", "ad", "product", "country", "device")
+_INSIGHT_FIELDS = {
+    *(f"{entity}.{metric}" for entity in _INSIGHT_METRIC_ENTITIES for metric in _INSIGHT_METRICS),
+    "ad_account.id",
+    "ad_account.name",
+    "ad_account.url",
+    "ad_account.budget.daily",
+    "ad_account.budget.lifetime",
     "campaign.id",
     "campaign.name",
+    "campaign.description",
+    "campaign.status",
+    "campaign.start_time",
+    "campaign.end_time",
+    "campaign.budget.daily",
+    "campaign.budget.lifetime",
     "ad_group.id",
     "ad_group.name",
+    "ad_group.description",
+    "ad_group.status",
     "ad.id",
     "ad.name",
+    "ad.title",
+    "ad.copy",
+    "ad.link",
+    "ad.status",
+    "ad.review_status",
+    "product.feed_id",
+    "product.item_id",
+    "product.title",
+    "product.description",
+    "product.body",
+    "product.target_url",
+    "product.image_url",
+    "product.brand",
+    "product.seller_name",
+    "product.price",
+    "product.availability",
+    "country.name",
+    "device.type",
     "metadata.readable_time",
-]
-_SUMMARY_METRIC_KEYS = (
-    "impressions",
-    "clicks",
-    "spend",
-    "ctr",
-    "cpc",
-    "cpm",
-    "conversions",
-)
+    "metadata.timezone",
+}
+_SNAKE_FIELD_PREFIXES = ("ad_account", "ad_group", "campaign", "product", "country", "device", "metadata", "ad")
+_SUMMARY_METRIC_KEYS = _INSIGHT_METRICS
+_FIELD_ENTITY_BY_SCOPE = {
+    "account": "campaign",
+    "campaign": "campaign",
+    "ad_group": "ad_group",
+    "ad": "ad",
+}
 
 
 def _insights_path(scope: str, entity_id: str | None) -> tuple[str | None, str | None]:
@@ -163,16 +190,99 @@ def _validate_sort(value: Any) -> tuple[list[str] | None, str | None]:
     return encoded, None
 
 
-def _row_metric(row: dict[str, Any], key: str) -> Any:
-    if key in row:
-        return row[key]
-    metrics = row.get("metrics")
-    if isinstance(metrics, dict) and key in metrics:
-        return metrics[key]
+def _field_entity(scope: str, aggregation_level: str | None) -> str:
+    if aggregation_level:
+        return aggregation_level
+    return _FIELD_ENTITY_BY_SCOPE[scope]
+
+
+def _default_insight_fields(entity: str) -> list[str]:
+    fields = [
+        f"{entity}.id",
+        f"{entity}.name",
+        *(f"{entity}.{metric}" for metric in _INSIGHT_METRICS),
+        "metadata.readable_time",
+        "metadata.timezone",
+    ]
+    return [field for field in fields if field in _INSIGHT_FIELDS]
+
+
+def _canonical_insight_field(field: str, entity: str) -> str | None:
+    if field in _INSIGHT_FIELDS:
+        return field
+    if field in _INSIGHT_METRICS:
+        candidate = f"{entity}.{field}"
+        return candidate if candidate in _INSIGHT_FIELDS else None
+    if field in {"readable_time", "timezone"}:
+        return f"metadata.{field}"
+    if field == "item_id":
+        return "product.item_id"
+    if field == "feed_id":
+        return "product.feed_id"
+    for prefix in _SNAKE_FIELD_PREFIXES:
+        head = f"{prefix}_"
+        if field.startswith(head):
+            rest = field[len(head):].replace("budget_daily", "budget.daily").replace("budget_lifetime", "budget.lifetime")
+            candidate = f"{prefix}.{rest}"
+            return candidate if candidate in _INSIGHT_FIELDS else None
     return None
 
 
-def _summarize_insights(payload: Any) -> dict[str, Any] | None:
+def _normalize_insight_fields(fields: list[str], entity: str) -> tuple[list[str] | None, str | None]:
+    canonical: list[str] = []
+    unknown: list[str] = []
+    for field in fields:
+        mapped = _canonical_insight_field(field, entity)
+        if mapped is None:
+            unknown.append(field)
+        elif mapped not in canonical:
+            canonical.append(mapped)
+    if unknown:
+        return None, _bad_request(
+            "Unknown ChatGPT Ads insight fields: "
+            + ", ".join(unknown)
+            + ". Use dotted fields such as campaign.id, campaign.name, campaign.impressions, "
+            "campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, "
+            "metadata.readable_time, and metadata.timezone. Shorthand impressions, clicks, spend, "
+            "ctr, cpc, and cpm are rewritten using the aggregation entity. "
+            "get_insights does not return conversions, conversion_rate, conversion_value, or roas."
+        )
+    return canonical, None
+
+
+def _numeric_metric(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _row_metric(row: dict[str, Any], key: str, entity: str | None = None) -> Any:
+    direct = _numeric_metric(row.get(key))
+    if direct is not None:
+        return direct
+    metrics = row.get("metrics")
+    if isinstance(metrics, dict):
+        nested_metric = _numeric_metric(metrics.get(key))
+        if nested_metric is not None:
+            return nested_metric
+    entities = [entity] if entity else []
+    entities.extend(candidate for candidate in _INSIGHT_METRIC_ENTITIES if candidate not in entities)
+    for prefix in entities:
+        dotted = _numeric_metric(row.get(f"{prefix}.{key}"))
+        if dotted is not None:
+            return dotted
+        nested = row.get(prefix)
+        if isinstance(nested, dict):
+            nested_value = _numeric_metric(nested.get(key))
+            if nested_value is not None:
+                return nested_value
+        snake = _numeric_metric(row.get(f"{prefix}_{key}"))
+        if snake is not None:
+            return snake
+    return None
+
+
+def _summarize_insights(payload: Any, entity: str = "campaign") -> dict[str, Any] | None:
     """Build a compact, LLM-friendly rollup so clients are not stuck on opaque list ids."""
     if not isinstance(payload, dict):
         return None
@@ -180,7 +290,7 @@ def _summarize_insights(payload: Any) -> dict[str, Any] | None:
     if not isinstance(rows, list) or not rows:
         return {"row_count": 0, "note": "No insight rows returned for this query."}
 
-    totals: dict[str, float] = {key: 0.0 for key in ("impressions", "clicks", "spend", "conversions")}
+    totals: dict[str, float] = {key: 0.0 for key in ("impressions", "clicks", "spend")}
     campaigns: dict[str, dict[str, Any]] = {}
     sample_rows: list[dict[str, Any]] = []
 
@@ -188,7 +298,7 @@ def _summarize_insights(payload: Any) -> dict[str, Any] | None:
         if not isinstance(row, dict):
             continue
         for key in totals:
-            value = _row_metric(row, key)
+            value = _row_metric(row, key, entity)
             if isinstance(value, (int, float)):
                 totals[key] += float(value)
 
@@ -204,21 +314,20 @@ def _summarize_insights(payload: Any) -> dict[str, Any] | None:
                     "impressions": 0.0,
                     "clicks": 0.0,
                     "spend": 0.0,
-                    "conversions": 0.0,
                 },
             )
             if campaign_name and not bucket.get("campaign_name"):
                 bucket["campaign_name"] = campaign_name
-            for key in ("impressions", "clicks", "spend", "conversions"):
-                value = _row_metric(row, key)
+            for key in ("impressions", "clicks", "spend"):
+                value = _row_metric(row, key, entity)
                 if isinstance(value, (int, float)):
                     bucket[key] += float(value)
 
         if len(sample_rows) < 10:
             sample = {
-                key: _row_metric(row, key)
+                key: _row_metric(row, key, entity)
                 for key in _SUMMARY_METRIC_KEYS
-                if _row_metric(row, key) is not None
+                if _row_metric(row, key, entity) is not None
             }
             readable = row.get("metadata", {})
             if isinstance(readable, dict) and readable.get("readable_time"):
@@ -283,14 +392,21 @@ async def get_insights(
     before: str | None = None,
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> str:
-    """Get performance insights for account, campaign, ad group, or ad scope.
+    """Get ChatGPT Ads performance insights for an account, campaign, ad group, or ad.
+
+    This is OpenAI Ads, not Google Ads. Request dotted fields such as
+    campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr,
+    campaign.cpc, campaign.cpm, campaign.id, campaign.name, and
+    metadata.readable_time. Shorthand impressions, clicks, spend, ctr, cpc,
+    and cpm are rewritten to the aggregation entity. conversions,
+    conversion_rate, conversion_value, and roas are not insight fields.
 
     Prefer omitting time_range so the API uses its recent default window.
     If you pass unix_range, start/end must be Unix seconds on full-hour
     boundaries (this tool hour-aligns them). Do not invent far-future ranges.
 
-    Defaults fields to impressions, clicks, spend, ctr, cpc, cpm, conversions,
-    and names so responses include usable metrics. Returns a `summary` rollup.
+    Omitting fields uses the aggregation entity's id, name, and core metrics
+    plus metadata.readable_time. Returns a summary rollup.
 
     Args:
         scope: account, campaign, ad_group, or ad.
@@ -298,7 +414,7 @@ async def get_insights(
         time_granularity: hourly, daily, monthly, or none. Default daily.
         time_range: Optional JSON object for unix_range, hour_range, or date_range.
         segments: Optional segment list: product, country, or device.
-        fields: Optional list of fields. Defaults to core metrics + names.
+        fields: Optional dotted field names. Bare metrics are prefixed automatically.
         filters: Optional list of JSON filter objects.
         sort: Optional list of JSON sort objects with field and direction.
         limit: Rows per page, 1-2000. Default 20.
@@ -334,8 +450,13 @@ async def get_insights(
     field_values, fields_err = _coerce_string_list(fields, "fields")
     if fields_err:
         return fields_err
+    field_entity = _field_entity(scope, aggregation_level)
     if field_values is None:
-        field_values = list(_DEFAULT_INSIGHT_FIELDS)
+        field_values = _default_insight_fields(field_entity)
+    else:
+        field_values, normalize_err = _normalize_insight_fields(field_values, field_entity)
+        if normalize_err:
+            return normalize_err
     if segment_values and segment_values[0] == "product" and not (
         field_values and ("product.feed_id" in field_values or "product.item_id" in field_values)
     ):
@@ -399,7 +520,7 @@ async def get_insights(
     )
     try:
         payload = await client.get(path, params=params)
-        summary = _summarize_insights(payload)
+        summary = _summarize_insights(payload, field_entity)
         if isinstance(payload, dict) and summary is not None:
             payload = {**payload, "summary": summary}
         return _ok_sized(

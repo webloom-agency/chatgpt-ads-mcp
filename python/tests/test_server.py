@@ -21,6 +21,14 @@ import openai_ads_mcp  # noqa: E402
 from openai_ads_mcp import mcp  # noqa: E402
 from openai_ads_mcp.client import OpenAIAdsAPIError, OpenAIAdsClient  # noqa: E402
 
+
+def _tool_data(result):
+    """Decode a tool return value, including MCP error results."""
+    if isinstance(result, str):
+        return json.loads(result)
+    assert result.isError is True
+    return json.loads(result.content[0].text)
+
 _SERVICE_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST_PATH = _SERVICE_ROOT / "mcpToolManifest.json"
 EXPECTED_TOOLS = [tool["name"] for tool in json.loads(_MANIFEST_PATH.read_text())["tools"]]
@@ -230,7 +238,7 @@ class TestReadTools:
     async def test_get_account(self, mock_client):
         from openai_ads_mcp.tools_account import get_account
 
-        data = json.loads(await get_account())
+        data = _tool_data(await get_account())
         assert data["ok"] is True
         mock_client.get.assert_called_once_with("/ad_account")
 
@@ -334,9 +342,77 @@ class TestInsights:
         await get_insights(scope="account")
         params = mock_client.get.call_args.kwargs["params"]
         assert params["aggregation_level"] == "campaign"
-        assert "impressions" in params["fields"]
-        assert "clicks" in params["fields"]
-        assert "spend" in params["fields"]
+        assert params["fields"] == [
+            "campaign.id",
+            "campaign.name",
+            "campaign.impressions",
+            "campaign.clicks",
+            "campaign.spend",
+            "campaign.ctr",
+            "campaign.cpc",
+            "campaign.cpm",
+            "metadata.readable_time",
+            "metadata.timezone",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_insights_maps_shorthand_metrics(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        await get_insights(
+            scope="account",
+            fields=["impressions", "clicks", "spend", "ctr", "cpc", "cpm", "campaign_id", "campaign_name"],
+        )
+        params = mock_client.get.call_args.kwargs["params"]
+        assert params["fields"] == [
+            "campaign.impressions",
+            "campaign.clicks",
+            "campaign.spend",
+            "campaign.ctr",
+            "campaign.cpc",
+            "campaign.cpm",
+            "campaign.id",
+            "campaign.name",
+        ]
+
+        mock_client.get.reset_mock()
+        await get_insights(scope="ad_group", entity_id="ag_1", fields=["impressions", "spend"])
+        assert mock_client.get.call_args.kwargs["params"]["fields"] == [
+            "ad_group.impressions",
+            "ad_group.spend",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_insights_rejects_unknown_metrics(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        result = await get_insights(
+            scope="account",
+            fields=["impressions", "roas", "conversions", "conversion_value"],
+        )
+        assert result.isError is True
+        data = json.loads(result.content[0].text)
+        assert "roas" in data["message"]
+        assert "conversions" in data["message"]
+        assert "campaign.impressions" in data["message"]
+        mock_client.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_insights_summary_reads_nested_campaign_metrics(self, mock_client):
+        from openai_ads_mcp.tools_insights import get_insights
+
+        mock_client.get.return_value = {
+            "data": [{
+                "id": "row_1",
+                "campaign": {"id": "camp_1", "name": "Brand", "impressions": 100, "clicks": 10, "spend": 5},
+                "metadata": {"readable_time": "2026-09-21"},
+            }]
+        }
+        data = _tool_data(await get_insights(scope="account"))
+        assert data["summary"]["totals"]["impressions"] == 100
+        assert data["summary"]["totals"]["clicks"] == 10
+        assert data["summary"]["totals"]["spend"] == 5
+        assert data["summary"]["by_campaign"][0]["campaign_name"] == "Brand"
 
     @pytest.mark.asyncio
     async def test_get_insights_hour_aligns_unix_range(self, mock_client):
@@ -372,7 +448,7 @@ class TestInsights:
         assert params["includes"] == ["zero_impression_products"]
 
         mock_client.get.reset_mock()
-        data = json.loads(await get_insights(
+        data = _tool_data(await get_insights(
             scope="campaign",
             entity_id="camp_1",
             aggregation_level="campaign",
@@ -386,7 +462,7 @@ class TestInsights:
     async def test_get_insights_requires_entity_id(self, mock_client):
         from openai_ads_mcp.tools_insights import get_insights
 
-        data = json.loads(await get_insights(scope="campaign"))
+        data = _tool_data(await get_insights(scope="campaign"))
         assert data["error"] is True
         mock_client.get.assert_not_called()
 
@@ -412,7 +488,7 @@ class TestWriteTools:
         from openai_ads_mcp.tools_campaigns import create_campaign
 
         monkeypatch.setenv("OPENAI_ADS_BUDGET_CEILING_USD", "10")
-        data = json.loads(await create_campaign(name="Big test", budget_usd=50))
+        data = _tool_data(await create_campaign(name="Big test", budget_usd=50))
         assert data["error"] is True
         assert "confirm_budget=True" in data["message"]
         mock_client.post.assert_not_called()
@@ -421,10 +497,10 @@ class TestWriteTools:
     async def test_create_campaign_rejects_active_status(self, mock_client):
         from openai_ads_mcp.tools_campaigns import create_campaign, update_campaign
 
-        data = json.loads(await create_campaign(name="Launch test", budget_usd=25, status="active"))
+        data = _tool_data(await create_campaign(name="Launch test", budget_usd=25, status="active"))
         assert data["error"] is True
         mock_client.post.assert_not_called()
-        data = json.loads(await update_campaign(campaign_id="camp_1", status="active"))
+        data = _tool_data(await update_campaign(campaign_id="camp_1", status="active"))
         assert data["error"] is True
         mock_client.post.assert_not_called()
 
@@ -443,7 +519,7 @@ class TestWriteTools:
         assert payload["conversion_event_setting_ids"] == ["event_setting_1"]
 
         mock_client.post.reset_mock()
-        data = json.loads(await create_campaign(
+        data = _tool_data(await create_campaign(
             name="Broken conversion test",
             budget_usd=25,
             bidding_type="conversions",
@@ -517,9 +593,9 @@ class TestWriteTools:
         from openai_ads_mcp.tools_adgroups import update_ad_group
         from openai_ads_mcp.tools_ads import update_ad
 
-        data = json.loads(await update_ad_group(ad_group_id="ag_1", status="active"))
+        data = _tool_data(await update_ad_group(ad_group_id="ag_1", status="active"))
         assert data["error"] is True
-        data = json.loads(await update_ad(ad_id="ad_1", status="active"))
+        data = _tool_data(await update_ad(ad_id="ad_1", status="active"))
         assert data["error"] is True
         mock_client.post.assert_not_called()
 
@@ -592,7 +668,7 @@ class TestHelpers:
             {"id": "ag_1", "status": "paused"},
             {"id": "ad_1", "status": "paused"},
         ])
-        data = json.loads(await build_campaign(
+        data = _tool_data(await build_campaign(
             name="Feed test",
             budget_usd=50,
             ad_group={
@@ -619,7 +695,7 @@ class TestHelpers:
     async def test_build_conversion_campaign_requires_click_billing(self, mock_client):
         from openai_ads_mcp.helpers import build_campaign
 
-        data = json.loads(await build_campaign(
+        data = _tool_data(await build_campaign(
             name="Conversion tree",
             budget_usd=50,
             bidding_type="conversions",
@@ -647,7 +723,7 @@ class TestHelpers:
             {"id": "camp_1", "status": "paused"},
             OpenAIAdsAPIError(403, "Access denied."),
         ])
-        data = json.loads(await build_campaign(
+        data = _tool_data(await build_campaign(
             name="Category test",
             budget_usd=50,
             ad_group={"name": "Buyers", "billing_event": "click", "max_bid_usd": 1.5},
@@ -680,7 +756,7 @@ class TestHelpers:
         from openai_ads_mcp.helpers import bulk_ab_test_hints
 
         mock_client.post = AsyncMock(side_effect=[{"id": "ad_1"}, {"id": "ad_2"}])
-        data = json.loads(await bulk_ab_test_hints("ag_1", [
+        data = _tool_data(await bulk_ab_test_hints("ag_1", [
             {
                 "title": "Find your AI gaps",
                 "body": "Track your brand in AI answers.",
@@ -746,7 +822,7 @@ class TestConversions:
     async def test_send_conversions_rejects_too_many(self, mock_client):
         from openai_ads_mcp.tools_conversions import send_conversions
 
-        data = json.loads(await send_conversions("px_1", [{"id": str(i), "type": "order_created"} for i in range(1001)]))
+        data = _tool_data(await send_conversions("px_1", [{"id": str(i), "type": "order_created"} for i in range(1001)]))
         assert data["error"] is True
         mock_client.post_conversions.assert_not_called()
 
@@ -755,7 +831,7 @@ class TestConversions:
         from openai_ads_mcp.tools_conversions import send_conversions
 
         stale = 1_000
-        data = json.loads(await send_conversions("px_1", [{
+        data = _tool_data(await send_conversions("px_1", [{
             "id": "evt_1",
             "type": "order_created",
             "timestamp_ms": stale,
@@ -784,7 +860,7 @@ class TestConversions:
             "source_url": "https://example.com",
             "user": {"email_sha256": "a" * 64},
         }]
-        data = json.loads(await send_conversions("px_1", events, validate_only=True))
+        data = _tool_data(await send_conversions("px_1", events, validate_only=True))
         assert data["ok"] is True
         mock_client.post_conversions.assert_called_once_with("px_1", events, True)
 
@@ -801,14 +877,14 @@ class TestConversions:
             "action_source": "mobile_app",
             "user": {"obref": "opaque-browser-reference"},
         }
-        data = json.loads(await send_conversions("px_1", [event]))
+        data = _tool_data(await send_conversions("px_1", [event]))
         assert data["ok"] is True
         mock_client.post_conversions.assert_called_once_with("px_1", [event], False)
 
         mock_client.post_conversions.reset_mock()
         event["action_source"] = "web"
         event["source_url"] = "https://example.com"
-        data = json.loads(await send_conversions("px_1", [event]))
+        data = _tool_data(await send_conversions("px_1", [event]))
         assert data["error"] is True
         assert "mobile_app" in data["message"]
         mock_client.post_conversions.assert_not_called()
@@ -835,7 +911,7 @@ class TestConversions:
             {"email_sha256": "A" * 64},
         ]
         for user in unsafe_users:
-            data = json.loads(await send_conversions("px_1", event_with_user(user)))
+            data = _tool_data(await send_conversions("px_1", event_with_user(user)))
             assert data["error"] is True
         mock_client.post_conversions.assert_not_called()
 
@@ -844,7 +920,7 @@ class TestConversions:
         from openai_ads_mcp._core import _now_ms
         from openai_ads_mcp.tools_conversions import send_conversions
 
-        data = json.loads(await send_conversions("px_1", [{
+        data = _tool_data(await send_conversions("px_1", [{
             "id": "evt_1",
             "type": "custom",
             "timestamp_ms": _now_ms(),
@@ -859,7 +935,7 @@ class TestConversions:
         from openai_ads_mcp.tools_conversions import manage_conversions
 
         monkeypatch.setenv("OPENAI_ADS_MCP_READONLY", "1")
-        data = json.loads(await manage_conversions(action="create_pixel", name="Blocked pixel"))
+        data = _tool_data(await manage_conversions(action="create_pixel", name="Blocked pixel"))
         assert data["error"] is True
         mock_client.post.assert_not_called()
 
