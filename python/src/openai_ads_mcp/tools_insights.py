@@ -317,7 +317,8 @@ def _normalize_insight_fields(fields: list[str], entity: str) -> tuple[list[str]
             "campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, "
             "metadata.readable_time, and metadata.timezone. Shorthand impressions, clicks, spend, "
             "ctr, cpc, and cpm are rewritten using the aggregation entity. "
-            "get_insights does not return conversions, conversion_rate, conversion_value, or roas."
+            "get_insights is delivery-only and does not return conversions, conversion_rate, "
+            "conversion_value, or roas — use get_performance for those KPIs."
         )
     return canonical, None
 
@@ -464,14 +465,18 @@ async def get_insights(
     before: str | None = None,
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> str:
-    """Get ChatGPT Ads performance insights for an account, campaign, ad group, or ad.
+    """DELIVERY ONLY — impressions, clicks, spend, CTR, CPC, CPM.
+
+    Never use get_insights for conversion KPIs, CPA, conversion_rate,
+    conversion_value, or ROAS; those fields are rejected here. Call
+    get_performance instead (or manage_conversions get_insights for
+    conversion-API reads).
 
     This is OpenAI Ads, not Google Ads. Request dotted fields such as
     campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr,
     campaign.cpc, campaign.cpm, campaign.id, campaign.name, and
     metadata.readable_time. Shorthand impressions, clicks, spend, ctr, cpc,
-    and cpm are rewritten to the aggregation entity. conversions,
-    conversion_rate, conversion_value, and roas are not insight fields.
+    and cpm are rewritten to the aggregation entity.
 
     Account totals use aggregation_level=ad_account and ad_account.* metrics.
     A campaign breakdown uses aggregation_level=campaign and campaign.* metrics.

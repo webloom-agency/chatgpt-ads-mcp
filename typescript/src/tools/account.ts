@@ -16,7 +16,7 @@ export const accountTools: AdsToolDefinition[] = [
   {
     name: "get_account",
     description:
-      "Get the authenticated OpenAI Ads account. Use this first to verify that OPENAI_ADS_API_KEY works and to read account id, name, timezone, currency, and settings.",
+      "Get the authenticated OpenAI Ads account for the server's OPENAI_ADS_API_KEY (or per-request Ads key). Call this first and confirm the returned adacct_… id matches the Ads Manager account you intend — the MCP is API-key scoped to exactly one ad account; there is no OAuth account picker, and pasting another adacct_… in a prompt does not switch accounts. Returns id, name, timezone, currency, and settings.",
     inputSchema: {},
     argNames: [],
     openWorld: true,

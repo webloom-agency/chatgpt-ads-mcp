@@ -7,11 +7,12 @@ from ._core import *
 
 @ads_tool(open_world=True)
 async def get_account() -> str:
-    """Get the authenticated OpenAI Ads account.
+    """Get the authenticated OpenAI Ads account for OPENAI_ADS_API_KEY.
 
-    This is the first tool to call after connecting. It verifies that
-    OPENAI_ADS_API_KEY is valid and returns the ad account id, name, timezone,
-    currency, and settings for the one account attached to the key.
+    Call this first and confirm the returned adacct_… id matches the Ads Manager
+    account you intend. The MCP is API-key scoped to exactly one ad account;
+    there is no OAuth account picker, and pasting another adacct_… in a prompt
+    does not switch accounts. Returns id, name, timezone, currency, and settings.
     """
     client, client_err = _get_client_or_error()
     if client_err:

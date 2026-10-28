@@ -179,7 +179,8 @@ function normalizeInsightFields(fields: string[], entity: string): [string[] | n
       "campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, " +
       "metadata.readable_time, and metadata.timezone. Shorthand impressions, clicks, spend, " +
       "ctr, cpc, and cpm are rewritten using the aggregation entity. " +
-      "get_insights does not return conversions, conversion_rate, conversion_value, or roas.",
+      "get_insights is delivery-only and does not return conversions, conversion_rate, " +
+      "conversion_value, or roas — use get_performance for those KPIs.",
     )];
   }
   return [canonical, null];
@@ -395,7 +396,7 @@ export const insightTools: AdsToolDefinition[] = [
   {
     name: "get_insights",
     description:
-      "Get ChatGPT Ads performance insights for an account, campaign, ad group, or ad. This is OpenAI Ads, not Google Ads. Use dotted fields such as campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, campaign.id, and campaign.name. Account totals use aggregation_level=ad_account with ad_account.* metrics. Campaign breakdowns use aggregation_level=campaign with campaign.* metrics. Do not mix those grains. time_granularity=none is one total and cannot include metadata.readable_time. A calendar week starts Monday 00:00 in the account timezone and ends at the current hour; on Monday that window is only the current day. Use time_granularity=daily for a multi-day week. Shorthand impressions, clicks, spend, ctr, cpc, and cpm are rewritten to the aggregation entity. conversions, conversion_rate, conversion_value, and roas are not insight fields.",
+      "DELIVERY ONLY (impressions, clicks, spend, CTR, CPC, CPM). Never use get_insights for conversion KPIs, CPA, conversion_rate, conversion_value, or ROAS — those fields are rejected here; call get_performance instead (or manage_conversions get_insights for conversion-API reads). This is OpenAI Ads, not Google Ads. Use dotted fields such as campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, campaign.cpc, campaign.cpm, campaign.id, and campaign.name. Account totals use aggregation_level=ad_account with ad_account.* metrics. Campaign breakdowns use aggregation_level=campaign with campaign.* metrics. Do not mix those grains. time_granularity=none is one total and cannot include metadata.readable_time. A calendar week starts Monday 00:00 in the account timezone and ends at the current hour; on Monday that window is only the current day. Use time_granularity=daily for a multi-day week. Shorthand impressions, clicks, spend, ctr, cpc, and cpm are rewritten to the aggregation entity.",
     inputSchema: {
       scope: z.enum(["account", "campaign", "ad_group", "ad"]),
       entity_id: z.string().optional(),

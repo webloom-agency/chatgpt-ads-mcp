@@ -439,7 +439,7 @@ export const performanceTools: AdsToolDefinition[] = [
   {
     name: "get_performance",
     description:
-      "Join ChatGPT Ads (not Google Ads) delivery spend with attributed conversion counts and compute CPA, conversion_rate, and ROAS. Use aggregation_level=campaign (default). ad_account is accepted as a shortcut and rolled up from campaigns because /conversions/insights rejects ad_account. Pass average_order_value or conversion_value_by_entity for ROAS. Dates are inclusive YYYY-MM-DD in the account timezone (default last 7 days).",
+      "REQUIRED for conversion KPIs (conversions, CPA, conversion_rate, ROAS). Do not use get_insights for these — get_insights is delivery-only. Joins ChatGPT Ads (not Google Ads) delivery spend with /conversions/insights attributed counts and computes CPA, conversion_rate, and ROAS. Use aggregation_level=campaign (default). ad_account is accepted as a shortcut and rolled up from campaigns because /conversions/insights rejects ad_account. Pass average_order_value or conversion_value_by_entity for ROAS. Dates are inclusive YYYY-MM-DD in the account timezone (default last 7 days). If conversions are 0 but Ads Manager shows more, call get_account first — the API key may be scoped to a different ad account.",
     inputSchema: {
       aggregation_level: z.enum(["campaign", "ad_group", "ad", "ad_account"]).default("campaign"),
       start_date: z.string().optional(),

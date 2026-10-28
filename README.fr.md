@@ -16,11 +16,12 @@ Les secrets restent dans des variables d’environnement — jamais en argument 
 
 | Objectif | Outil |
 | --- | --- |
-| Vérifier la clé / le compte | `get_account` |
+| Vérifier la clé / le compte | `get_account` (doit correspondre à l’`adacct_…` Ads Manager ; une clé = un compte) |
 | Lister campagnes, ad groups, ads | `list_campaigns`, `list_ad_groups`, `list_ads` |
-| Performances | `get_insights` (diffusion) · `get_performance` (dépenses + conversions → CPA / ROAS) |
+| Stats diffusion | `get_insights` (impressions / clics / spend / CTR / CPC / CPM uniquement) |
+| KPIs conversions | `get_performance` (obligatoire pour conversions → CPA / ROAS — jamais `get_insights`) |
 | Audiences & geo | `list_audiences`, `search_geo`, … |
-| Conversions (lecture) | `manage_conversions` (`get_event_settings`, …) |
+| Conversions (lectures API) | `manage_conversions` (`get_event_settings`, `get_insights`, …) |
 
 Exemples de prompts :
 
@@ -57,7 +58,7 @@ curl -sS -H "Authorization: Bearer $OPENAI_ADS_API_KEY" \
 
 > Règle simple : **app bureau → A**, **chat web / cloud → B**.
 
-OpenAI Ads n’a **pas d’OAuth** pour l’instant. Les clients distants utilisent toujours URL + bearer.
+OpenAI Ads n’a **pas d’OAuth** pour l’instant. Les clients distants utilisent toujours URL + bearer. La clé Ads est liée à **un seul** compte annonceur — pas de sélecteur de compte, et coller un autre `adacct_…` dans le prompt ne change pas le MCP.
 
 ---
 
@@ -239,8 +240,10 @@ Ne mettez **pas** `OPENAI_ADS_API_KEY` dans les headers du client. Elle reste su
 
 ## Astuces reporting
 
-- Préférez **omettre** `time_range` : l’API utilise alors sa fenêtre récente par défaut.
-- Bon premier appel : `get_insights` avec `scope=account`, `aggregation_level=campaign`, `time_granularity=daily`.
+- Toujours commencer par **`get_account`** et vérifier que l’`adacct_…` correspond à Ads Manager.
+- Diffusion : `get_insights` avec `scope=account`, `aggregation_level=campaign`, `time_granularity=daily`.
+- Conversions / CPA / ROAS : utiliser **`get_performance`** — jamais `get_insights` (il refuse les champs conversion ; un « — » côté UI signifie souvent colonne absente, pas zéro).
+- Préférez **omettre** `time_range` sur `get_insights` : l’API utilise alors sa fenêtre récente par défaut.
 - Les réponses incluent un `summary` (totaux + par campagne).
 - Si vous passez un `unix_range`, les timestamps doivent être alignés à l’**heure pleine** (le serveur les aligne).
 
@@ -263,6 +266,8 @@ Les outils d’écriture (`create_campaign`, `update_campaign`, `set_campaign_st
 | --- | --- |
 | `401` sur `/mcp` | Le bearer doit correspondre exactement à `MCP_BEARER_TOKEN` |
 | Ads API `401` | Mauvaise clé — recréez dans Ads Manager → Settings → API keys |
+| Conversions dans Ads Manager, `0` / mauvaises campagnes via MCP | Appeler `get_account` — mauvaise `OPENAI_ADS_API_KEY` (autre `adacct_…`). Rotater la clé sur l’hôte et redéployer. Coller un autre id dans le prompt ne change rien. |
+| KPI conversion affiche « — » | Dataset issu de `get_insights` (pas de colonnes conversion). Requête avec `get_performance`. |
 | `duplicate_parameter` / `fields` | Redéployez une build qui encode `fields[]` (main actuel) |
 | Handshake MCP qui bloque | Garder `MCP_TRANSPORT=http` + `MCP_STATELESS_HTTP=true` (éviter SSE sur Render) |
 | Instance Render gratuite endormie | Premier appel après inactivité ~30 s |

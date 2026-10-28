@@ -218,10 +218,10 @@ async def get_performance(
     conversion_value_by_entity: Any = None,
     response_format: Literal["concise", "detailed"] = "concise",
 ) -> str:
-    """Join ChatGPT Ads delivery insights with attributed conversions and compute CPA/ROAS.
+    """REQUIRED for conversion KPIs (conversions, CPA, conversion_rate, ROAS).
 
-    This is OpenAI Ads / ChatGPT Ads, not Google Ads. Delivery reporting has no
-    conversions/ROAS fields, so this tool:
+    Do not use get_insights for these — get_insights is delivery-only.
+    This is OpenAI Ads / ChatGPT Ads, not Google Ads. This tool:
     1. Pulls impressions, clicks, and spend from delivery insights.
     2. Pulls attributed conversion counts from /conversions/insights.
     3. Computes conversion_rate, CPA, and ROAS on the server.
@@ -237,7 +237,8 @@ async def get_performance(
     last 7 calendar days including today.
 
     Ingest events with send_conversions; configure settings with manage_conversions.
-    Empty conversions usually means no attributed events yet.
+    If conversions are 0 but Ads Manager shows more, call get_account first — the
+    API key may be scoped to a different ad account.
     """
     if level_err := _validate_option("aggregation_level", aggregation_level, _PERF_LEVELS):
         return level_err

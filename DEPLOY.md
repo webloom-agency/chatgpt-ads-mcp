@@ -15,8 +15,10 @@ OpenAI Ads has **no OAuth**. Remote clients use:
 
 | Secret | Lives on | Sent by client? |
 | --- | --- | --- |
-| `OPENAI_ADS_API_KEY` | Render env | No |
+| `OPENAI_ADS_API_KEY` | Render env | No — scopes the MCP to **one** Ads Manager account |
 | `MCP_BEARER_TOKEN` | Render env + client header | Yes (`Authorization: Bearer …`) |
+
+There is **no account picker**. After deploy, call `get_account` and confirm the returned `adacct_…` is the account you intend. Pasting another account id in a client prompt does not switch keys.
 
 ---
 
@@ -131,9 +133,10 @@ Use the same `MCP_BEARER_TOKEN` you set on Render. Never put `OPENAI_ADS_API_KEY
 
 ## 6. First prompts
 
-1. `get_account`
+1. `get_account` — confirm `adacct_…` matches Ads Manager
 2. `list_campaigns`
-3. `get_insights` (impressions, clicks, spend, ctr, cpc, cpm)
+3. `get_insights` — delivery only (impressions, clicks, spend, ctr, cpc, cpm)
+4. `get_performance` — conversions / CPA / ROAS (required; never use `get_insights` for these)
 
 ### Enable campaign editing later
 
@@ -152,6 +155,7 @@ Use the same `MCP_BEARER_TOKEN` you set on Render. Never put `OPENAI_ADS_API_KEY
 | `401` on `/mcp` | Bearer must match `MCP_BEARER_TOKEN` exactly |
 | Free tier sleep | First request after idle ~30s; Starter stays warmer |
 | Ads API 401 | Bad `OPENAI_ADS_API_KEY` |
+| Wrong campaigns / 0 conversions vs Ads Manager | Wrong Ads key on Render — `get_account` shows a different `adacct_…`. Set the LiveMentor (or intended) key and redeploy. |
 
 ---
 

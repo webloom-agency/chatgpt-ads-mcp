@@ -118,8 +118,11 @@ MCP_HTTP_PATH = os.getenv("MCP_HTTP_PATH", "/mcp").strip() or "/mcp"
 mcp = FastMCP(
     "OpenAI Ads",
     instructions=(
-        "Typed MCP tools for OpenAI's Advertiser API. Use get_account first to "
-        "confirm the API key works, then read insights before changing spend. "
+        "Typed MCP tools for OpenAI's Advertiser API. Always call get_account first "
+        "and confirm the returned adacct_… matches the Ads Manager account you mean — "
+        "the MCP is scoped to one ad account via OPENAI_ADS_API_KEY. There is no OAuth "
+        "account picker; pasting another adacct_… in a prompt does not switch accounts. "
+        "Then read insights before changing spend. "
         "The safest workflow is: check the account, inspect campaigns and "
         "insights, build new campaigns paused, review the created campaign, ad "
         "group, and ads, then activate each layer explicitly when the user asks.\n\n"
@@ -130,14 +133,13 @@ mcp = FastMCP(
         "set OPENAI_ADS_MCP_ALLOW_WRITES=1 (or OPENAI_ADS_MCP_READONLY=0) and restart. "
         "In readonly mode conversion read actions remain available.\n"
         "  4. Conversion event ingestion never logs user data. Validate batches before sending them.\n"
-        "Stats workflow: get_account → list_campaigns → get_insights for delivery, "
-        "or get_performance to join spend with attributed conversions and compute "
-        "CPA / conversion_rate / ROAS. "
+        "Stats workflow: get_account → list_campaigns → get_insights for delivery ONLY "
+        "(impressions/clicks/spend/CTR/CPC/CPM). For conversions, CPA, conversion_rate, "
+        "or ROAS you MUST call get_performance (joins delivery + /conversions/insights) — "
+        "never get_insights. manage_conversions get_insights is for conversion-API reads only. "
         "This is ChatGPT Ads / OpenAI Ads. Insight fields are dotted names such as "
         "campaign.impressions, campaign.clicks, campaign.spend, campaign.ctr, "
-        "campaign.cpc, and campaign.cpm. get_insights does not return conversions, "
-        "conversion_rate, conversion_value, or roas; use get_performance or "
-        "manage_conversions for those."
+        "campaign.cpc, and campaign.cpm."
     ),
     lifespan=_lifespan,
     transport_security=_transport_security,
